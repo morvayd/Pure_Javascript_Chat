@@ -1,0 +1,384 @@
+<!--  
+Starting the ollama server in server mode
+1. Quit Ollama app from the toolbar
+2. From the cli run run the following.
+    export OLLAMA_ORIGINS="*"
+    ollama serve
+3. keep the cli open for the server to corretly operate.
+4. Open Ollama Chat Stream.html in your favorite browser.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ollama Chat v2026.04.04 - Streaming</title>
+<style>
+    body {
+    font-family: sans-serif;
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.6;
+    }
+    .container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    }
+    textarea {
+    width: 100%;
+    height: 250px;
+    padding: 0.5rem;
+    font-size: 1rem;
+    resize: vertical;
+    }
+    button {
+    padding: 0.75rem 1.5rem;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    }
+    button:hover {
+    background-color: #0056b3;
+    }
+    button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+    }
+
+    /* Specific style for the Clear button to make it red */
+    #clearBtn {
+    background-color: #dc3545;
+    }
+    #clearBtn:hover {
+    background-color: #a71d2a;
+    }
+
+    /* Specific style for the Save Prompt button to make it purple */
+    #savePromptBtn {
+    background-color: #6f42c1;
+    }
+    #savePromptBtn:hover {
+    background-color: #5a32a3;
+    }
+
+    #result {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+    border-left: 4px solid #007bff;
+    white-space: pre-wrap; /* Preserves formatting */
+    display: none;
+    }
+    .button-group {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    }
+    .button-group-right {
+    margin-left: auto;
+    }
+    .loading {
+    color: #666;
+    font-style: italic;
+    }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Ollama AI Chat (Streaming)</h1>
+<table><tr><td width="15%">Select Model:</td><td>
+<select name="modelselect" id="modelselect" style="font-size: 1rem;">
+    <option disabled selected>Loading models...</option>
+</select>
+<span id="modelStatus" class="loading" style="margin-left: 1rem;">Loading model list...</span>
+<td style="color: red;">&nbsp;Note: Answers will take longer after model changes.</td>
+</tr></table>
+<textarea id="prompt" placeholder="Enter your question here..."></textarea>
+
+<div class="button-group">
+<button id="submitBtn" onclick="askOllama()">Submit</button>
+<button id="clearBtn" onclick="clearInput()">Clear</button>
+<div class="button-group-right">
+<button id="savePromptBtn" onclick="savePrompt()">Save Prompt</button>
+</div>
+</div>
+
+<div id="result"></div>
+<button id="copyAnswerBtn" onclick="copyAnswer()">Copy Answer</button>
+</div>
+
+<script>
+
+// Function to clear the textarea
+function clearInput() {
+    document.getElementById('prompt').value = '';
+}
+
+async function loadModelList() {
+    const select = document.getElementById('modelselect');
+    const status = document.getElementById('modelStatus');
+    const fallbackModels = [
+        'granite-code:20b',
+        'nemotron-3-nano:30b',
+        'gemma4:26b',
+        'gpt-oss:20b',
+        'granite4:32b-a9b-h',
+        'qwen3.5:2b',
+        'qwen3.5:35b',
+        'qwen2.5-coder:14b',
+        'granite3-guardian:8B',
+        'granite4:3b'
+    ];
+
+    function populateOptions(models) {
+        const sorted = Array.from(new Set(models.filter(Boolean))).sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
+        );
+        if (sorted.length === 0) {
+            throw new Error('No model names available');
+        }
+        select.innerHTML = sorted
+            .map((model, index) =>
+                `<option value="${model}"${index === 0 ? ' selected' : ''}>${model}</option>`
+            )
+            .join('');
+        status.style.display = 'none';
+    }
+
+    try {
+        const response = await fetch('http://localhost:11434/api/tags');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        let models = [];
+
+        if (Array.isArray(data)) {
+            if (data.every(item => typeof item === 'string')) {
+                models = data;
+            } else {
+                models = data.map(item => item?.name || item?.model || '').filter(Boolean);
+            }
+        } else if (typeof data === 'object' && data !== null) {
+            const candidates = data.models || data.tags || [];
+            if (Array.isArray(candidates)) {
+                if (candidates.every(item => typeof item === 'string')) {
+                    models = candidates;
+                } else {
+                    models = candidates.map(item => item?.name || item?.model || '').filter(Boolean);
+                }
+            }
+        }
+
+        if (models.length === 0) {
+            throw new Error('Empty model list from server');
+        }
+
+        populateOptions(models);
+    } catch (error) {
+        console.error('Failed to load Ollama model list:', error);
+        populateOptions(fallbackModels);
+        status.textContent = 'Could not load model list; using fallback options.';
+        status.style.display = 'inline';
+
+        const warning = document.createElement('p');
+        warning.style.color = 'orange';
+        warning.style.marginTop = '0.5rem';
+        warning.textContent = 'Warning: Could not load Ollama model list from server. Using fallback model list.';
+        select.parentNode.appendChild(warning);
+    }
+}
+
+window.addEventListener('DOMContentLoaded', loadModelList);
+
+// Function to format date as YYYY.MM.DD
+function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}.${month}.${day}`;
+}
+
+// Function to get the next available version number
+function getNextVersionNumber(dateStr) {
+    const stored = JSON.parse(localStorage.getItem('promptVersions') || '{}');
+    const todaysVersions = stored[dateStr] || [];
+    if (todaysVersions.length === 0) {
+        return 0;
+    }
+    return Math.max(...todaysVersions) + 1;
+}
+
+// Function to track a version number for a date
+function trackVersion(dateStr, versionNumber) {
+    const stored = JSON.parse(localStorage.getItem('promptVersions') || '{}');
+    if (!stored[dateStr]) {
+        stored[dateStr] = [];
+    }
+    if (!stored[dateStr].includes(versionNumber)) {
+        stored[dateStr].push(versionNumber);
+    }
+    localStorage.setItem('promptVersions', JSON.stringify(stored));
+}
+
+// Function to save the prompt
+async function savePrompt() {
+    try {
+        const promptText = document.getElementById('prompt').value.trim();
+
+        if (!promptText) {
+            alert('Please enter a question in the prompt box before saving.');
+            return;
+        }
+
+        const selectedModel = document.getElementById('modelselect').value;
+        
+        // Format the date
+        const today = new Date();
+        const dateStr = formatDate(today);
+        const baseFilename = `Prompt Ollama Chat - ${dateStr}`;
+
+        const versionNumber = getNextVersionNumber(dateStr);
+        const filename = `${baseFilename} v${versionNumber}.txt`;
+
+        // Prepare the file content with headers
+        const fileContent = `Title: Ollama Chat\nModel: ${selectedModel}\nDate: ${dateStr}\n-------------------------------------------\n\n${promptText}`;
+
+        // Create a blob and trigger download
+        const blob = new Blob([fileContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        // Track the version number for the day
+        trackVersion(dateStr, versionNumber);
+
+        alert(`Prompt file ready to save as:\n${filename}\n\nYour browser will save this to your Downloads folder by default.`);
+
+    } catch (error) {
+        console.error('Error saving prompt:', error);
+        alert(`Error saving prompt: ${error.message}`);
+    }
+}
+
+function copyAnswer() {
+    const answerDiv = document.getElementById('answerText');
+    if (!answerDiv) {
+        alert('No answer available to copy.');
+        return;
+    }
+    const answerText = answerDiv.innerText.trim();
+    if (!answerText) {
+        alert('No answer available to copy.');
+        return;
+    }
+    navigator.clipboard.writeText(answerText)
+        .then(() => {
+            alert('Answer copied to clipboard.');
+        })
+        .catch((err) => {
+            console.error('Clipboard copy failed:', err);
+            alert('Copy failed. Please try again or use your browser clipboard directly.');
+        });
+}
+        
+async function askOllama() {
+    const startTime = Date.now();
+    const modelNew = document.getElementById('modelselect').value;
+    const promptInput = document.getElementById('prompt');
+    const resultDiv = document.getElementById('result');
+    const submitBtn = document.getElementById('submitBtn');
+    const prompt = promptInput.value.trim();
+
+    if (!prompt) {
+        alert("Please enter a question.");
+        return;
+    }
+
+    // UI Updates
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<span class="loading">Generating response...</span>';
+    submitBtn.disabled = true;
+
+    // We'll use this to store the accumulated text
+    let fullResponse = "";
+
+    try {
+        const response = await fetch('http://localhost:11434/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: modelNew,
+                prompt: prompt,
+                stream: true // CHANGED: Set to true for streaming
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.statusText}`);
+        }
+
+        // Set up the reader for the stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        // Prepare the result div to hold the text
+        resultDiv.innerHTML = "<font size='2'>Streaming response...</font><hr><br><font size='3'>";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                
+                try {
+                    const json = JSON.parse(line);
+                    if (json.response) {
+                        fullResponse += json.response;
+                        resultDiv.innerHTML = `<font size='2'>Streaming response...</font><hr><br><font size='3'>${fullResponse}`;
+                    }
+                    if (json.done) {
+                        const endTime = Date.now();
+                        const deltaSeconds = Math.round((endTime - startTime) / 1000);
+                        resultDiv.innerHTML = `<font size='2'>Time to answer: ${deltaSeconds} seconds</font><hr><br><font size='3'>${fullResponse}`;
+                    }
+                } catch (e) {
+                    console.error("Error parsing JSON chunk", e);
+                }
+            }
+        }
+
+        resultDiv.innerHTML = `<div class="answer-meta"><span>Time to answer: ${Math.round((Date.now() - startTime) / 1000)} seconds</span></div><hr><div id="answerText"><font size="3">${fullResponse}</font></div>`;
+
+    } catch (error) {
+        console.error(error);
+        let errorMsg = "Error: Could not connect to Ollama.";
+        if (error.message.includes("Failed to fetch")) {
+            errorMsg += " Ensure your Ollama server is running and CORS is enabled.";
+        } else {
+            errorMsg += error.message;
+        }
+        resultDiv.innerHTML = `<span style="color: red;">${errorMsg}</span>`;
+    } finally {
+        submitBtn.disabled = false;
+    }
+}
+</script>
+</body>
+</html>

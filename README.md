@@ -20,7 +20,7 @@ A browser-based interface for interacting with a local Ollama AI server using st
 #### Setup
 
 1. Install [Ollama](https://ollama.ai/) locally on your machine
-2. Quit Ollama app from the toolbar
+2. Quit Ollama app from the toolbar.
 3. From the cli run run the following.
     ```bash
     export OLLAMA_ORIGINS="*"

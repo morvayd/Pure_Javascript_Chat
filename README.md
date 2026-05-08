@@ -20,12 +20,14 @@ A browser-based interface for interacting with a local Ollama AI server using st
 #### Setup
 
 1. Install [Ollama](https://ollama.ai/) locally on your machine
-2. Start the Ollama server in server mode with CORS enabled:
-   ```bash
-   export OLLAMA_ORIGINS="*"
-   ollama serve
-   ```
-3. Keep the terminal open for the server to operate correctly.
+2. Quit Ollama app from the toolbar
+3. From the cli run run the following.
+    ```bash
+    export OLLAMA_ORIGINS="*"
+    ollama serve
+    ```
+4. keep the cli open for the server to corretly operate.  
+5. Open Ollama Chat Stream.html in your favorite browser.  
 
 #### Usage
 

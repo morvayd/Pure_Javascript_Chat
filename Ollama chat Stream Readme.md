@@ -22,10 +22,10 @@ Starting the ollama server in server mode
         ollama serve
       ```
     - (Windows) From the cli run the following.
-    ```bash
+      ```bash
         set OLLAMA_ORIGINS="*"
         ollama serve
-    ```
+      ```
 3. keep the cli open for the server to corretly operate.
 4. Open Ollama Chat Stream.html in your favorite browser. 
 

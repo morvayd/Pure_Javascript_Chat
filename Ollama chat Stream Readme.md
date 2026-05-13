@@ -13,12 +13,6 @@ This app provides a streaming chat interface to a local Ollama server, allowing 
 
 ## Installation
 
-1. Clone or download this folder to your local machine.
-2. Make sure Ollama is installed and available locally.
-3. Start Ollama in server mode with CORS enabled:
-
-
-Starting the ollama server in server mode
 Starting the ollama server in server mode
 1. Quit Ollama app from the toolbar
 2. Enable CORS mode from Ollama.
@@ -30,7 +24,6 @@ Starting the ollama server in server mode
         ollama serve
 3. keep the cli open for the server to corretly operate.
 4. Open Ollama Chat Stream.html in your favorite browser. 
-
 
 ## Running the App
 

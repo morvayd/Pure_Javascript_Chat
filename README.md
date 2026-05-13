@@ -27,10 +27,10 @@ A browser-based interface for interacting with a local Ollama AI server using st
     ollama serve
     ```
     - (Windows) From the cli run the following.
-    ''' bash
+    ```bash
     set OLLAMA_ORIGINS="*"
     ollama serve
-    '''
+    ```
 4. keep the cli open for the server to corretly operate.  
 5. Open Ollama Chat Stream.html in your favorite browser.  
 

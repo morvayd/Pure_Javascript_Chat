@@ -19,14 +19,17 @@ This app provides a streaming chat interface to a local Ollama server, allowing 
 
 
 Starting the ollama server in server mode
+Starting the ollama server in server mode
 1. Quit Ollama app from the toolbar
-2. From the cli run run the following.
-    ```bash
-    export OLLAMA_ORIGINS="*"
-    ollama serve
-    ```
-3. keep the cli open for the server to corretly operate.  
-4. Open Ollama Chat Stream.html in your favorite browser.  
+2. Enable CORS mode from Ollama.
+    - (Linux / MacOS) From the cli run run the following.
+        export OLLAMA_ORIGINS="*"
+        ollama serve
+    - (Windows) From the cli run the following.
+        set OLLA<A_ORIGINS="*"
+        ollama serve
+3. keep the cli open for the server to corretly operate.
+4. Open Ollama Chat Stream.html in your favorite browser. 
 
 
 ## Running the App

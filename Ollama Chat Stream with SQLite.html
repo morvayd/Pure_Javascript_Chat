@@ -1,0 +1,759 @@
+<!--  
+Starting the ollama server in server mode
+1. Quit Ollama app from the toolbar
+2. From the cli run run the following.
+    export OLLAMA_ORIGINS="*"
+    ollama serve
+3. keep the cli open for the server to corretly operate.
+4. Open Ollama Chat Stream with SQLite.html in your favorite browser.
+5. Click "Setup Database Folder" to choose where to save the database.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ollama Chat v2026.06.03 - Streaming with SQLite</title>
+<style>
+    body {
+    font-family: sans-serif;
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.6;
+    }
+    .container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    }
+    textarea {
+    width: 100%;
+    height: 250px;
+    padding: 0.5rem;
+    font-size: 1rem;
+    resize: vertical;
+    }
+    button {
+    padding: 0.75rem 1.5rem;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    }
+    button:hover {
+    background-color: #0056b3;
+    }
+    button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+    }
+
+    /* Specific style for the Clear button to make it red */
+    #clearBtn {
+    background-color: #dc3545;
+    }
+    #clearBtn:hover {
+    background-color: #a71d2a;
+    }
+
+    /* Specific style for the Save Prompt button to make it purple */
+    #savePromptBtn {
+    background-color: #6f42c1;
+    }
+    #savePromptBtn:hover {
+    background-color: #5a32a3;
+    }
+
+    /* Database buttons */
+    #setupDbBtn {
+    background-color: #28a745;
+    }
+    #setupDbBtn:hover {
+    background-color: #218838;
+    }
+
+    #result {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+    border-left: 4px solid #007bff;
+    white-space: pre-wrap; /* Preserves formatting */
+    display: none;
+    }
+    .button-group {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    }
+    .button-group-right {
+    margin-left: auto;
+    }
+    .loading {
+    color: #666;
+    font-style: italic;
+    }
+    .db-status {
+    padding: 0.5rem;
+    margin: 0.5rem 0;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    }
+    .db-status.success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    }
+    .db-status.warning {
+    background-color: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+    }
+    .db-status.error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Ollama AI Chat (Streaming + SQLite)</h1>
+
+<!-- Database Status -->
+<div id="dbStatus" class="db-status warning">
+    Database: Not configured. Click "Setup Database Folder" to enable auto-save.
+</div>
+
+<table><tr><td width="15%">Select Model:</td><td>
+<select name="modelselect" id="modelselect" style="font-size: 1rem;">
+    <option disabled selected>Loading models...</option>
+</select>
+<span id="modelStatus" class="loading" style="margin-left: 1rem;">Loading model list...</span>
+<td style="color: red;">&nbsp;Note: Answers will take longer after model changes.</td>
+</tr></table>
+<textarea id="prompt" placeholder="Enter your question here..."></textarea>
+
+<div class="button-group">
+<button id="submitBtn" onclick="askOllama()">Submit</button>
+<button id="clearBtn" onclick="clearInput()">Clear</button>
+<button id="setupDbBtn" onclick="setupDatabaseFolder()">Setup Database Folder</button>
+<div class="button-group-right">
+<button id="savePromptBtn" onclick="savePrompt()">Save Prompt</button>
+</div>
+</div>
+
+<div id="result"></div>
+<button id="copyAnswerBtn" onclick="copyAnswer()">Copy Answer</button>
+</div>
+
+<!-- Load sql.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+
+<script>
+// Global variables for database
+let db = null;
+let SQL = null;
+let fileHandle = null;
+let dbInitialized = false;
+
+// Initialize sql.js
+async function initDatabase() {
+    try {
+        // Wait for sql.js library to be available
+        if (typeof initSqlJs === 'undefined') {
+            throw new Error('sql.js library not loaded from CDN');
+        }
+        
+        SQL = await initSqlJs({
+            locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}`
+        });
+        
+        // Try to load existing database from localStorage
+        const savedDb = localStorage.getItem('ollamaChatsDb');
+        if (savedDb) {
+            const uint8Array = new Uint8Array(JSON.parse(savedDb));
+            db = new SQL.Database(uint8Array);
+            console.log('Loaded existing database from localStorage');
+        } else {
+            db = new SQL.Database();
+            console.log('Created new database');
+        }
+        
+        // Create table if it doesn't exist
+        db.run(`
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                computer_os TEXT NOT NULL,
+                model TEXT NOT NULL,
+                user_input TEXT NOT NULL,
+                ollama_response TEXT NOT NULL,
+                response_time_seconds INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Check if token columns exist in existing databases, add them if not
+        try {
+            const columns = db.exec('PRAGMA table_info(chat_history)');
+            if (columns.length > 0) {
+                const columnNames = columns[0].values.map(col => col[1]);
+                
+                if (!columnNames.includes('input_tokens')) {
+                    db.run('ALTER TABLE chat_history ADD COLUMN input_tokens INTEGER');
+                    console.log('Added input_tokens column to existing table');
+                }
+                if (!columnNames.includes('output_tokens')) {
+                    db.run('ALTER TABLE chat_history ADD COLUMN output_tokens INTEGER');
+                    console.log('Added output_tokens column to existing table');
+                }
+            }
+        } catch (e) {
+            console.error('Error checking/adding token columns:', e);
+        }
+        
+        dbInitialized = true;
+        updateDbStatus('Database initialized in memory. Click "Setup Database Folder" to enable auto-save.', 'warning');
+        
+        // Check if we have a saved file handle
+        const savedHandleId = localStorage.getItem('dbFileHandleId');
+        if (savedHandleId) {
+            updateDbStatus('Database ready. File handle from previous session available.', 'success');
+        }
+        
+    } catch (error) {
+        console.error('Error initializing sql.js:', error);
+        updateDbStatus('Error initializing database: ' + error.message, 'error');
+    }
+}
+
+// Load existing database file
+// Setup database folder using File System Access API
+// This function handles both creating new databases and loading existing ones
+async function setupDatabaseFolder() {
+    try {
+        // Check if File System Access API is supported
+        if (!('showSaveFilePicker' in window)) {
+            alert('File System Access API is not supported in your browser. Please use Chrome or Edge.\n\nThe database will still work in memory, but auto-save to disk is not available.');
+            return;
+        }
+        
+        if (!SQL) {
+            alert('Database system not initialized yet. Please wait a moment and try again.');
+            return;
+        }
+        
+        const options = {
+            suggestedName: 'ollama_chat_history.db',
+            types: [{
+                description: 'SQLite Database',
+                accept: { 'application/x-sqlite3': ['.db', '.sqlite', '.sqlite3'] }
+            }]
+        };
+        
+        fileHandle = await window.showSaveFilePicker(options);
+        
+        // Try to read the file to see if it already exists with data
+        try {
+            const file = await fileHandle.getFile();
+            if (file.size > 0) {
+                // File exists and has data - load it
+                const arrayBuffer = await file.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+                db = new SQL.Database(uint8Array);
+                
+                // Verify the table exists and has the correct structure
+                const result = db.exec('SELECT name FROM sqlite_master WHERE type="table" AND name="chat_history"');
+                if (result.length === 0) {
+                    // Table doesn't exist, create it
+                    db.run(`
+                        CREATE TABLE IF NOT EXISTS chat_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            date TEXT NOT NULL,
+                            user_id TEXT NOT NULL,
+                            computer_os TEXT NOT NULL,
+                            model TEXT NOT NULL,
+                            user_input TEXT NOT NULL,
+                            ollama_response TEXT NOT NULL,
+                            response_time_seconds INTEGER,
+                            input_tokens INTEGER,
+                            output_tokens INTEGER,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                    `);
+                } else {
+                    // Check if token columns exist, add them if not
+                    const columns = db.exec('PRAGMA table_info(chat_history)');
+                    const columnNames = columns[0].values.map(col => col[1]);
+                    
+                    if (!columnNames.includes('input_tokens')) {
+                        db.run('ALTER TABLE chat_history ADD COLUMN input_tokens INTEGER');
+                    }
+                    if (!columnNames.includes('output_tokens')) {
+                        db.run('ALTER TABLE chat_history ADD COLUMN output_tokens INTEGER');
+                    }
+                }
+                
+                const recordCount = getRecordCount();
+                updateDbStatus(`Loaded existing database: ${fileHandle.name} | ${recordCount} records | Auto-save enabled`, 'success');
+                alert(`Existing database loaded!\nFile: ${fileHandle.name}\nRecords: ${recordCount}\n\nNew conversations will be appended to this database.`);
+            } else {
+                // File is empty or new - use current database
+                await saveDatabaseToFile();
+                updateDbStatus(`New database created: ${fileHandle.name} | Auto-save enabled`, 'success');
+                alert(`New database created!\nFile: ${fileHandle.name}\n\nConversations will be saved to this database.`);
+            }
+        } catch (readError) {
+            // File doesn't exist yet or can't be read - save current database
+            await saveDatabaseToFile();
+            updateDbStatus(`New database created: ${fileHandle.name} | Auto-save enabled`, 'success');
+            alert(`New database created!\nFile: ${fileHandle.name}\n\nConversations will be saved to this database.`);
+        }
+        
+        dbInitialized = true;
+        
+        // Store a flag that we have permission and remember the filename
+        localStorage.setItem('dbFileHandleId', 'configured');
+        localStorage.setItem('lastDbFileName', fileHandle.name);
+        
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log('User cancelled file picker');
+        } else {
+            console.error('Error setting up database:', error);
+            updateDbStatus('Error setting up database: ' + error.message, 'error');
+            alert('Error setting up database: ' + error.message);
+        }
+    }
+}
+
+// Save database to file
+async function saveDatabaseToFile() {
+    if (!fileHandle) {
+        console.log('No file handle available');
+        return;
+    }
+    
+    try {
+        const writable = await fileHandle.createWritable();
+        const data = db.export();
+        await writable.write(data);
+        await writable.close();
+        
+        // Also save to localStorage as backup
+        localStorage.setItem('ollamaChatsDb', JSON.stringify(Array.from(data)));
+        
+        console.log('Database saved successfully');
+    } catch (error) {
+        console.error('Error saving database:', error);
+        updateDbStatus('Error auto-saving database: ' + error.message, 'error');
+    }
+}
+
+// Update database status display
+function updateDbStatus(message, type) {
+    const statusDiv = document.getElementById('dbStatus');
+    statusDiv.textContent = 'Database: ' + message;
+    statusDiv.className = 'db-status ' + type;
+}
+
+// Save chat to database
+async function saveChatToDatabase(userInput, ollamaResponse, responseTime, model, inputTokens, outputTokens) {
+    if (!db || !dbInitialized) {
+        console.error('Database not initialized');
+        return;
+    }
+    
+    try {
+        const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+        const userId = getUserId();
+        const computerOs = getComputerOS();
+        
+        db.run(
+            `INSERT INTO chat_history (date, user_id, computer_os, model, user_input, ollama_response, response_time_seconds, input_tokens, output_tokens)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [date, userId, computerOs, model, userInput, ollamaResponse, responseTime, inputTokens, outputTokens]
+        );
+        
+        console.log('Chat saved to database');
+        
+        // Auto-save to file if configured
+        if (fileHandle) {
+            await saveDatabaseToFile();
+            updateDbStatus(`Auto-saved to ${fileHandle.name} | Total records: ${getRecordCount()}`, 'success');
+        } else {
+            // Save to localStorage as backup
+            const data = db.export();
+            localStorage.setItem('ollamaChatsDb', JSON.stringify(Array.from(data)));
+            updateDbStatus(`Saved to memory | Total records: ${getRecordCount()} | Setup folder for auto-save`, 'warning');
+        }
+        
+    } catch (error) {
+        console.error('Error saving to database:', error);
+        updateDbStatus('Error saving chat: ' + error.message, 'error');
+    }
+}
+
+// Get record count
+function getRecordCount() {
+    if (!db) return 0;
+    const result = db.exec('SELECT COUNT(*) as count FROM chat_history');
+    return result[0]?.values[0][0] || 0;
+}
+
+// Get or create user ID
+function getUserId() {
+    let userId = localStorage.getItem('ollamaUserId');
+    if (!userId) {
+        userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('ollamaUserId', userId);
+    }
+    return userId;
+}
+
+// Detect computer OS
+function getComputerOS() {
+    const userAgent = navigator.userAgent;
+    const platform = navigator.platform;
+    
+    if (userAgent.indexOf('Win') !== -1) return 'Windows';
+    if (userAgent.indexOf('Mac') !== -1) return 'macOS';
+    if (userAgent.indexOf('Linux') !== -1) return 'Linux';
+    if (userAgent.indexOf('Android') !== -1) return 'Android';
+    if (userAgent.indexOf('iOS') !== -1 || userAgent.indexOf('iPhone') !== -1) return 'iOS';
+    
+    return platform || 'Unknown';
+}
+
+// Check if user needs to reconnect to database file
+async function checkDatabaseReconnection() {
+    const hadFileHandle = localStorage.getItem('dbFileHandleId');
+    const lastDbName = localStorage.getItem('lastDbFileName');
+    
+    if (hadFileHandle && lastDbName) {
+        const reconnect = confirm(
+            `Previous session detected!\n\n` +
+            `Last database file: ${lastDbName}\n\n` +
+            `Would you like to reconnect to your database file?\n\n` +
+            `Click OK to select your database file, or Cancel to start fresh in memory.`
+        );
+        
+        if (reconnect) {
+            // Give user a moment to see the message, then open file picker
+            setTimeout(() => {
+                setupDatabaseFolder();
+            }, 300);
+        } else {
+            updateDbStatus('Working in memory. Click "Setup Database Folder" to save to disk.', 'warning');
+        }
+    }
+}
+
+// Initialize database on page load
+window.addEventListener('DOMContentLoaded', () => {
+    // Give sql.js time to load from CDN before initializing
+    setTimeout(() => {
+        initDatabase();
+        // Check if we should prompt to reconnect to database file
+        setTimeout(() => {
+            checkDatabaseReconnection();
+        }, 1000);
+    }, 500);
+    loadModelList();
+});
+
+// Function to clear the textarea
+function clearInput() {
+    document.getElementById('prompt').value = '';
+}
+
+async function loadModelList() {
+    const select = document.getElementById('modelselect');
+    const status = document.getElementById('modelStatus');
+    const fallbackModels = [
+        'granite-code:20b',
+        'nemotron-3-nano:30b',
+        'gemma4:26b',
+        'gpt-oss:20b',
+        'granite4:32b-a9b-h',
+        'qwen3.5:2b',
+        'qwen3.5:35b',
+        'qwen2.5-coder:14b',
+        'granite3-guardian:8B',
+        'granite4:3b'
+    ];
+
+    function populateOptions(models) {
+        const sorted = Array.from(new Set(models.filter(Boolean))).sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
+        );
+        if (sorted.length === 0) {
+            throw new Error('No model names available');
+        }
+        select.innerHTML = sorted
+            .map((model, index) =>
+                `<option value="${model}"${index === 0 ? ' selected' : ''}>${model}</option>`
+            )
+            .join('');
+        status.style.display = 'none';
+    }
+
+    try {
+        const response = await fetch('http://localhost:11434/api/tags');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        let models = [];
+
+        if (Array.isArray(data)) {
+            if (data.every(item => typeof item === 'string')) {
+                models = data;
+            } else {
+                models = data.map(item => item?.name || item?.model || '').filter(Boolean);
+            }
+        } else if (typeof data === 'object' && data !== null) {
+            const candidates = data.models || data.tags || [];
+            if (Array.isArray(candidates)) {
+                if (candidates.every(item => typeof item === 'string')) {
+                    models = candidates;
+                } else {
+                    models = candidates.map(item => item?.name || item?.model || '').filter(Boolean);
+                }
+            }
+        }
+
+        if (models.length === 0) {
+            throw new Error('Empty model list from server');
+        }
+
+        populateOptions(models);
+    } catch (error) {
+        console.error('Failed to load Ollama model list:', error);
+        populateOptions(fallbackModels);
+        status.textContent = 'Could not load model list; using fallback options.';
+        status.style.display = 'inline';
+
+        const warning = document.createElement('p');
+        warning.style.color = 'orange';
+        warning.style.marginTop = '0.5rem';
+        warning.textContent = 'Warning: Could not load Ollama model list from server. Using fallback model list.';
+        select.parentNode.appendChild(warning);
+    }
+}
+
+// Function to format date as YYYY.MM.DD
+function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}.${month}.${day}`;
+}
+
+// Function to get the next available version number
+function getNextVersionNumber(dateStr) {
+    const stored = JSON.parse(localStorage.getItem('promptVersions') || '{}');
+    const todaysVersions = stored[dateStr] || [];
+    if (todaysVersions.length === 0) {
+        return 0;
+    }
+    return Math.max(...todaysVersions) + 1;
+}
+
+// Function to track a version number for a date
+function trackVersion(dateStr, versionNumber) {
+    const stored = JSON.parse(localStorage.getItem('promptVersions') || '{}');
+    if (!stored[dateStr]) {
+        stored[dateStr] = [];
+    }
+    if (!stored[dateStr].includes(versionNumber)) {
+        stored[dateStr].push(versionNumber);
+    }
+    localStorage.setItem('promptVersions', JSON.stringify(stored));
+}
+
+// Function to save the prompt
+async function savePrompt() {
+    try {
+        const promptText = document.getElementById('prompt').value.trim();
+
+        if (!promptText) {
+            alert('Please enter a question in the prompt box before saving.');
+            return;
+        }
+
+        const selectedModel = document.getElementById('modelselect').value;
+        
+        // Format the date
+        const today = new Date();
+        const dateStr = formatDate(today);
+        const baseFilename = `Prompt Ollama Chat - ${dateStr}`;
+
+        const versionNumber = getNextVersionNumber(dateStr);
+        const filename = `${baseFilename} v${versionNumber}.txt`;
+
+        // Prepare the file content with headers
+        const fileContent = `Title: Ollama Chat\nModel: ${selectedModel}\nDate: ${dateStr}\n-------------------------------------------\n\n${promptText}`;
+
+        // Create a blob and trigger download
+        const blob = new Blob([fileContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        // Track the version number for the day
+        trackVersion(dateStr, versionNumber);
+
+        alert(`Prompt file ready to save as:\n${filename}\n\nYour browser will save this to your Downloads folder by default.`);
+
+    } catch (error) {
+        console.error('Error saving prompt:', error);
+        alert(`Error saving prompt: ${error.message}`);
+    }
+}
+
+function copyAnswer() {
+    const answerDiv = document.getElementById('answerText');
+    if (!answerDiv) {
+        alert('No answer available to copy.');
+        return;
+    }
+    const answerText = answerDiv.innerText.trim();
+    if (!answerText) {
+        alert('No answer available to copy.');
+        return;
+    }
+    navigator.clipboard.writeText(answerText)
+        .then(() => {
+            alert('Answer copied to clipboard.');
+        })
+        .catch((err) => {
+            console.error('Clipboard copy failed:', err);
+            alert('Copy failed. Please try again or use your browser clipboard directly.');
+        });
+}
+        
+async function askOllama() {
+    const startTime = Date.now();
+    const modelNew = document.getElementById('modelselect').value;
+    const promptInput = document.getElementById('prompt');
+    const resultDiv = document.getElementById('result');
+    const submitBtn = document.getElementById('submitBtn');
+    const prompt = promptInput.value.trim();
+
+    if (!prompt) {
+        alert("Please enter a question.");
+        return;
+    }
+
+    // UI Updates
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<span class="loading">Generating response...</span>';
+    submitBtn.disabled = true;
+
+    // We'll use this to store the accumulated text and token counts
+    let fullResponse = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    try {
+        const response = await fetch('http://localhost:11434/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: modelNew,
+                prompt: prompt,
+                stream: true
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.statusText}`);
+        }
+
+        // Set up the reader for the stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        // Prepare the result div to hold the text
+        resultDiv.innerHTML = "<font size='2'>Streaming response...</font><hr><br><font size='3'>";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                
+                try {
+                    const json = JSON.parse(line);
+                    if (json.response) {
+                        fullResponse += json.response;
+                        resultDiv.innerHTML = `<font size='2'>Streaming response...</font><hr><br><font size='3'>${fullResponse}`;
+                    }
+                    if (json.done) {
+                        const endTime = Date.now();
+                        const deltaSeconds = Math.round((endTime - startTime) / 1000);
+                        
+                        // Capture token counts from the final response
+                        if (json.prompt_eval_count) {
+                            inputTokens = json.prompt_eval_count;
+                        }
+                        if (json.eval_count) {
+                            outputTokens = json.eval_count;
+                        }
+                        
+                        resultDiv.innerHTML = `<font size='2'>Time to answer: ${deltaSeconds} seconds</font><hr><br><font size='3'>${fullResponse}`;
+                    }
+                } catch (e) {
+                    console.error("Error parsing JSON chunk", e);
+                }
+            }
+        }
+
+        const responseTime = Math.round((Date.now() - startTime) / 1000);
+        
+        // Display token counts if available
+        let tokenInfo = '';
+        if (inputTokens > 0 || outputTokens > 0) {
+            tokenInfo = ` | Input tokens: ${inputTokens} | Output tokens: ${outputTokens}`;
+        }
+        
+        resultDiv.innerHTML = `<div class="answer-meta"><span>Time to answer: ${responseTime} seconds${tokenInfo}</span></div><hr><div id="answerText"><font size="3">${fullResponse}</font></div>`;
+
+        // Save to database
+        await saveChatToDatabase(prompt, fullResponse, responseTime, modelNew, inputTokens, outputTokens);
+
+    } catch (error) {
+        console.error(error);
+        let errorMsg = "Error: Could not connect to Ollama.";
+        if (error.message.includes("Failed to fetch")) {
+            errorMsg += " Ensure your Ollama server is running and CORS is enabled.";
+        } else {
+            errorMsg += error.message;
+        }
+        resultDiv.innerHTML = `<span style="color: red;">${errorMsg}</span>`;
+    } finally {
+        submitBtn.disabled = false;
+    }
+}
+</script>
+</body>
+</html>

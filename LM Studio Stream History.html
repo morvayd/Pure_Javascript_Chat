@@ -1,0 +1,816 @@
+<!--  
+  Starting the LM Studio server mode
+    LM Studio - Start on port 1234
+    Left Side:  Developer -> Local Server (in the list top) -> Middle Drop Down Button:  Server Settings
+        => Click on "Enable CORS"
+
+    #  ---- or ----
+
+    #  cli window
+    lms server start --cors
+    lms load google/gemma4-26b-a4b
+
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LM Studio Chat v2026.04.07</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 1000px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            line-height: 1.6;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            padding: 1rem;
+            border-radius: 4px;
+        }
+        textarea {
+            width: 100%;
+            height: 400px;
+            padding: 0.5rem;
+            font-size: 1rem;
+            resize: vertical;
+        }
+        button {
+            padding: 0.75rem 1.5rem;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        /* Specific style for the Clear button to make it red */
+        #clearBtn {
+        background-color: #dc3545;
+        }
+        #clearBtn:hover {
+        background-color: #a71d2a;
+        }
+
+        /* Make the Copy Answer button full width on next row */
+        #copyAnswerBtn {
+            flex-basis: 100%;
+        }
+
+        #result {
+            margin-top: 1rem;
+            padding: 1rem;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+            white-space: pre-wrap; /* Preserves formatting */
+            display: none;
+        }
+        .button-group {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            width: 100%;
+            padding: 0.5rem;
+            border-radius: 4px;
+            flex-wrap: wrap;
+        }
+        .button-group-right {
+            margin-left: auto;
+        }
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+        .db-status {
+            padding: 0.5rem;
+            margin: 0.5rem 0;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        .db-status.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .db-status.warning {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .db-status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        /* Specific style for the Setup DB button to make it green */
+        #setupDbBtn {
+            background-color: #28a745;
+        }
+        #setupDbBtn:hover {
+            background-color: #218838;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Chat with LM Studio</h1>
+        
+        <!-- Database Status -->
+         <div><button id="setupDbBtn" onclick="setupDatabaseFolder()">Setup Database Folder</button></div>
+        <div id="dbStatus" class="db-status warning">
+            Database: Folder not selected.   Click "Setup Database Folder" to select a folder enable persistent historical auto-save.
+        </div>
+        
+        <table><tr><td width="15%">Note:</td><td id="modelDisplayText">Loading model information...</td>
+        </tr></table>
+        
+        <textarea id="prompt" placeholder="Enter your question here..."></textarea>
+
+        <div class="button-group">
+            <button id="submitBtn" onclick="askOllama()">Submit</button>
+            <button id="clearBtn" onclick="clearInput()">Clear</button>
+            <div class="button-group-right">
+                
+                <button id="savePromptBtn" onclick="savePrompt()">Save Prompt</button>
+            </div>
+            <div id="result" style="flex-basis: 100%;"></div>
+            <button id="copyAnswerBtn" onclick="copyAnswer()">Copy Answer</button>
+        </div>
+
+    </div>
+
+    <!-- Load sql.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+
+    <script>
+
+        // Global variables for database
+        let db = null;
+        let SQL = null;
+        let fileHandle = null;
+        let dbInitialized = false;
+
+        // Initialize sql.js
+        async function initDatabase() {
+            try {
+                // Wait for sql.js library to be available
+                if (typeof initSqlJs === 'undefined') {
+                    throw new Error('sql.js library not loaded from CDN');
+                }
+                
+                SQL = await initSqlJs({
+                    locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}`
+                });
+                
+                // Try to load existing database from localStorage
+                const savedDb = localStorage.getItem('lmstudioChatsDb');
+                if (savedDb) {
+                    const uint8Array = new Uint8Array(JSON.parse(savedDb));
+                    db = new SQL.Database(uint8Array);
+                    console.log('Loaded existing database from localStorage');
+                } else {
+                    db = new SQL.Database();
+                    console.log('Created new database');
+                }
+                
+                // Create table if it doesn't exist
+                db.run(`
+                    CREATE TABLE IF NOT EXISTS chat_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        computer_os TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        user_input TEXT NOT NULL,
+                        ollama_response TEXT NOT NULL,
+                        response_time_seconds INTEGER,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                
+                
+                dbInitialized = true;
+                updateDbStatus('Folder not selected.   Click "Setup Database Folder" to select a folder enable persistent historical auto-save.', 'warning');
+                
+                // Check if we have a saved folder handle
+                const savedHandleId = localStorage.getItem('dbFolderHandleId');
+                if (savedHandleId) {
+                    updateDbStatus('Database ready. Connected to folder with auto-save.', 'success');
+                }
+                
+            } catch (error) {
+                console.error('Error initializing sql.js:', error);
+                updateDbStatus('Error initializing database: ' + error.message, 'error');
+            }
+        }
+
+        // Setup database folder using File System Access API
+        async function setupDatabaseFolder() {
+            try {
+                // Check if File System Access API is supported
+                if (!('showDirectoryPicker' in window)) {
+                    alert('File System Access API is not supported in your browser. Please use Chrome or Edge.');
+                    return;
+                }
+                
+                if (!SQL) {
+                    alert('Database system not initialized yet. Please wait a moment and try again.');
+                    return;
+                }
+                
+                // Try to load stored directory handle first
+                let storedHandle = await loadDirectoryHandleFromIndexedDB();
+                
+                if (storedHandle) {
+                    // Try to use the stored handle
+                    try {
+                        // Verify the handle is still accessible
+                        const permission = await storedHandle.queryPermission({ mode: 'readwrite' });
+                        if (permission === 'granted') {
+                            fileHandle = storedHandle;
+                            console.log('Using previously saved folder access');
+                            await loadAndInitializeDatabase();
+                            return;
+                        }
+                    } catch (err) {
+                        console.log('Stored handle no longer accessible, requesting new folder selection');
+                    }
+                }
+                
+                // Prompt user to select the folder
+                fileHandle = await window.showDirectoryPicker({
+                    mode: 'readwrite'
+                });
+                
+                // Store the new handle in IndexedDB for future use
+                await saveDirectoryHandleToIndexedDB(fileHandle);
+                
+                // Load and initialize with the newly selected folder
+                await loadAndInitializeDatabase();
+                
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.log('User cancelled folder picker');
+                    updateDbStatus('Database not configured. Please restart to set up database.', 'warning');
+                } else {
+                    console.error('Error setting up database:', error);
+                    updateDbStatus('Error setting up database: ' + error.message, 'error');
+                    alert('Error setting up database: ' + error.message);
+                }
+            }
+        }
+
+        // Save database to file
+        async function saveDatabaseToFile() {
+            if (!fileHandle) {
+                console.log('No folder handle available');
+                return;
+            }
+            
+            try {
+                // Get current data from in-memory database
+                if (!db) {
+                    console.error('Database not initialized');
+                    return;
+                }
+                
+                const data = db.export();
+                
+                // Get the file handle with create flag
+                const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: true });
+                
+                // Create writable stream - completely rewrite the database file with all data
+                const writer = await fileHandleDb.createWritable({ truncate: true });
+                
+                // Write the entire database (which includes all existing records + new ones)
+                await writer.write(data);
+                
+                // Close the writer - this ensures the file is properly committed to disk
+                await writer.close();
+                
+                // Also save to localStorage as backup
+                localStorage.setItem('lmstudioChatsDb', JSON.stringify(Array.from(data)));
+                
+                console.log('Database saved successfully - all records preserved');
+            } catch (error) {
+                console.error('Error saving database:', error);
+                updateDbStatus('Error auto-saving database: ' + error.message, 'error');
+                
+                // Fall back to localStorage if file save fails
+                try {
+                    const data = db.export();
+                    localStorage.setItem('lmstudioChatsDb', JSON.stringify(Array.from(data)));
+                    console.log('Saved to localStorage as fallback');
+                } catch (fallbackError) {
+                    console.error('Failed to save to localStorage:', fallbackError);
+                }
+            }
+        }
+
+        // Load directory handle from IndexedDB
+        async function loadDirectoryHandleFromIndexedDB() {
+            return new Promise((resolve) => {
+                const request = indexedDB.open('lmstudioDB', 1);
+                
+                request.onsuccess = (event) => {
+                    try {
+                        const db = event.target.result;
+                        const transaction = db.transaction(['folderHandle'], 'readonly');
+                        const store = transaction.objectStore('folderHandle');
+                        const getRequest = store.get('chatFolderHandle');
+                        
+                        getRequest.onsuccess = () => {
+                            resolve(getRequest.result?.handle || null);
+                        };
+                        getRequest.onerror = () => resolve(null);
+                    } catch (err) {
+                        resolve(null);
+                    }
+                };
+                
+                request.onerror = () => resolve(null);
+                request.onupgradeneeded = (event) => {
+                    try {
+                        const indexedDB = event.target.result;
+                        if (!indexedDB.objectStoreNames.contains('folderHandle')) {
+                            indexedDB.createObjectStore('folderHandle');
+                        }
+                    } catch (err) {
+                        console.log('Could not create object store');
+                    }
+                };
+            });
+        }
+
+        // Save directory handle to IndexedDB
+        async function saveDirectoryHandleToIndexedDB(handle) {
+            return new Promise((resolve) => {
+                const request = indexedDB.open('lmstudioDB', 1);
+                
+                request.onsuccess = (event) => {
+                    try {
+                        const db = event.target.result;
+                        const transaction = db.transaction(['folderHandle'], 'readwrite');
+                        const store = transaction.objectStore('folderHandle');
+                        store.put({ handle: handle }, 'chatFolderHandle');
+                        transaction.oncomplete = () => resolve(true);
+                        transaction.onerror = () => resolve(false);
+                    } catch (err) {
+                        resolve(false);
+                    }
+                };
+                
+                request.onerror = () => resolve(false);
+                request.onupgradeneeded = (event) => {
+                    try {
+                        const indexedDB = event.target.result;
+                        if (!indexedDB.objectStoreNames.contains('folderHandle')) {
+                            indexedDB.createObjectStore('folderHandle');
+                        }
+                    } catch (err) {
+                        console.log('Could not create object store');
+                    }
+                };
+            });
+        }
+
+        // Load and initialize database from the selected folder
+        async function loadAndInitializeDatabase() {
+            try {
+                // Try to load existing database from the selected folder
+                const file = await fileHandle.getFile('lmstudio_chat_history.db');
+                if (file && file.size > 0) {
+                    // File exists and has data - load it
+                    const arrayBuffer = await file.arrayBuffer();
+                    const uint8Array = new Uint8Array(arrayBuffer);
+                    
+                    // Store current in-memory data before loading from file
+                    let currentData = null;
+                    if (db) {
+                        try {
+                            currentData = db.export();
+                        } catch (e) {
+                            console.log('No existing data to preserve');
+                        }
+                    }
+                    
+                    // Load database from file
+                    db = new SQL.Database(uint8Array);
+                    
+                    // Verify the table exists
+                    const result = db.exec('SELECT name FROM sqlite_master WHERE type="table" AND name="chat_history"');
+                    if (result.length === 0) {
+                        // Table doesn't exist, create it
+                        db.run(`
+                            CREATE TABLE IF NOT EXISTS chat_history (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                date TEXT NOT NULL,
+                                user_id TEXT NOT NULL,
+                                computer_os TEXT NOT NULL,
+                                model TEXT NOT NULL,
+                                user_input TEXT NOT NULL,
+                                ollama_response TEXT NOT NULL,
+                                response_time_seconds INTEGER,
+                                input_tokens INTEGER,
+                                output_tokens INTEGER,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                            )
+                        `);
+                    }
+                    
+                    const recordCount = getRecordCount();
+                    updateDbStatus(`Connected to folder | ${recordCount} records | Auto-save enabled`, 'success');
+                    console.log(`Loaded database from file with ${recordCount} existing records`);
+                } else {
+                    // File is empty or new - save current in-memory database to file
+                    console.log('Database file is empty or new, saving current data');
+                    await saveDatabaseToFile();
+                    const recordCount = getRecordCount();
+                    updateDbStatus(`Database ready | ${recordCount} records | Auto-save enabled`, 'success');
+                }
+            } catch (readError) {
+                // File doesn't exist yet - save current in-memory database to create it
+                console.log('Database file does not exist, creating with current data');
+                await saveDatabaseToFile();
+                const recordCount = getRecordCount();
+                updateDbStatus(`Database ready | ${recordCount} records | Auto-save enabled`, 'success');
+            }
+            
+            dbInitialized = true;
+        }
+
+        // Update database status display
+        function updateDbStatus(message, type) {
+            const statusDiv = document.getElementById('dbStatus');
+            statusDiv.textContent = 'Database: ' + message;
+            statusDiv.className = 'db-status ' + type;
+        }
+
+        // Save chat to database
+        async function saveChatToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens) {
+            if (!db || !dbInitialized) {
+                console.error('Database not initialized');
+                return;
+            }
+            
+            try {
+                const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+                const userId = getUserId();
+                const computerOs = getComputerOS();
+                
+                db.run(
+                    `INSERT INTO chat_history (date, user_id, computer_os, model, user_input, ollama_response, response_time_seconds, input_tokens, output_tokens)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [date, userId, computerOs, model, userInput, lmstudioResponse, responseTime, inputTokens, outputTokens]
+                );
+                
+                console.log('Chat saved to database');
+                
+                // Auto-save to file if configured
+                if (fileHandle) {
+                    await saveDatabaseToFile();
+                    updateDbStatus(`Auto-saved | Total records: ${getRecordCount()} | Auto-save enabled`, 'success');
+                } else {
+                    // Save to localStorage as backup
+                    const data = db.export();
+                    localStorage.setItem('lmstudioChatsDb', JSON.stringify(Array.from(data)));
+                    updateDbStatus(`Saved to memory | Total records: ${getRecordCount()} | Restart to select folder for auto-save`, 'warning');
+                }
+                
+            } catch (error) {
+                console.error('Error saving to database:', error);
+                updateDbStatus('Error saving chat: ' + error.message, 'error');
+            }
+        }
+
+        // Get record count
+        function getRecordCount() {
+            if (!db) return 0;
+            const result = db.exec('SELECT COUNT(*) as count FROM chat_history');
+            return result[0]?.values[0][0] || 0;
+        }
+
+        // Get or create user ID
+        function getUserId() {
+            let userId = localStorage.getItem('lmstudioUserId');
+            if (!userId) {
+                userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('lmstudioUserId', userId);
+            }
+            return userId;
+        }
+
+        // Detect computer OS
+        function getComputerOS() {
+            const userAgent = navigator.userAgent;
+            const platform = navigator.platform;
+            
+            if (userAgent.indexOf('Win') !== -1) return 'Windows';
+            if (userAgent.indexOf('Mac') !== -1) return 'macOS';
+            if (userAgent.indexOf('Linux') !== -1) return 'Linux';
+            if (userAgent.indexOf('Android') !== -1) return 'Android';
+            if (userAgent.indexOf('iOS') !== -1 || userAgent.indexOf('iPhone') !== -1) return 'iOS';
+            
+            return platform || 'Unknown';
+        }
+
+        // Optional: Check if user needs to reconnect to database file
+        async function checkDatabaseReconnection() {
+            const hadFolderHandle = localStorage.getItem('dbFolderHandleId');
+            
+            if (hadFolderHandle) {
+                // Try to reconnect to previous folder
+                try {
+                    const permission = await navigator.permissions.query({ name: 'file-system-access' });
+                    if (permission.state !== 'granted') {
+                        updateDbStatus('Previous folder access lost. Click Setup Database Folder to reconnect.', 'warning');
+                    }
+                } catch (err) {
+                    console.log('Permission check not available');
+                }
+            }
+        }
+
+        // Initialize database on page load
+        window.addEventListener('DOMContentLoaded', async () => {
+            // Give sql.js time to load from CDN before initializing
+            await new Promise(resolve => setTimeout(resolve, 500));
+            initDatabase();
+            checkCurrentModel();
+        });
+
+        
+        async function checkCurrentModel() {
+            const modelDisplayText = document.getElementById('modelDisplayText');
+            
+            try {
+                const response = await fetch('http://localhost:1234/v1/models');
+                if (!response.ok) {
+                    throw new Error(`Server Error: ${response.status}`);
+                }
+                const data = await response.json();
+                
+                // Extract just the currently loaded model
+                if (data.data && data.data.length > 0) {
+                    const currentModel = data.data[0].id;
+                    modelDisplayText.textContent = `Currently Loaded Model: ${currentModel}`;
+                } else {
+                    modelDisplayText.textContent = 'No models currently loaded';
+                }
+            } catch (error) {
+                modelDisplayText.textContent = `Error loading model info. Make sure LM Studio server is running on port 1234`;
+            }
+        }
+
+        // Function to clear the textarea
+        function clearInput() {
+            document.getElementById('prompt').value = '';
+        }
+
+        // Function to format date as YYYY.MM.DD
+        function formatDate(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}.${month}.${day}`;
+        }
+
+        // Function to get the next available version number
+        function getNextVersionNumber(dateStr) {
+            const stored = JSON.parse(localStorage.getItem('promptVersions') || '{}');
+            const todaysVersions = stored[dateStr] || [];
+            if (todaysVersions.length === 0) {
+                return 0;
+            }
+            return Math.max(...todaysVersions) + 1;
+        }
+
+        // Function to track a version number for a date
+        function trackVersion(dateStr, versionNumber) {
+            const stored = JSON.parse(localStorage.getItem('promptVersions') || '{}');
+            if (!stored[dateStr]) {
+                stored[dateStr] = [];
+            }
+            if (!stored[dateStr].includes(versionNumber)) {
+                stored[dateStr].push(versionNumber);
+            }
+            localStorage.setItem('promptVersions', JSON.stringify(stored));
+        }
+
+        // Function to save the prompt
+        async function savePrompt() {
+            try {
+                const promptText = document.getElementById('prompt').value.trim();
+
+                if (!promptText) {
+                    alert('Please enter a question in the prompt box before saving.');
+                    return;
+                }
+
+                const selectedModel = 'local-model';
+                const today = new Date();
+                const dateStr = formatDate(today);
+                const baseFilename = `Prompt LM Studio Chat - ${dateStr}`;
+
+                const versionNumber = getNextVersionNumber(dateStr);
+                const filename = `${baseFilename} v${versionNumber}.txt`;
+
+                const fileContent = `Title: LM Studio Chat\nModel: ${selectedModel}\nDate: ${dateStr}\n-------------------------------------------\n\n${promptText}`;
+
+                const blob = new Blob([fileContent], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                trackVersion(dateStr, versionNumber);
+
+                alert(`Prompt file ready to save as:\n${filename}\n\nYour browser will save this to your Downloads folder by default.`);
+
+            } catch (error) {
+                console.error('Error saving prompt:', error);
+                alert(`Error saving prompt: ${error.message}`);
+            }
+        }
+
+        function copyAnswer() {
+            const answerDiv = document.getElementById('answerText');
+            if (!answerDiv) {
+                alert('No answer available to copy.');
+                return;
+            }
+            const answerText = answerDiv.innerText.trim();
+            if (!answerText) {
+                alert('No answer available to copy.');
+                return;
+            }
+            navigator.clipboard.writeText(answerText)
+                .then(() => {
+                    alert('Answer copied to clipboard.');
+                })
+                .catch((err) => {
+                    console.error('Clipboard copy failed:', err);
+                    alert('Copy failed. Please try again or use your browser clipboard directly.');
+                });
+        }
+        
+        async function askOllama() {
+            const startTime = Date.now();
+
+            const promptInput = document.getElementById('prompt');
+            const resultDiv = document.getElementById('result');
+            const submitBtn = document.getElementById('submitBtn');
+            
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                alert("Please enter a question.");
+                return;
+            }
+
+            // UI Updates
+            resultDiv.style.display = 'block';
+            resultDiv.innerHTML = '<div class="answer-meta"><span id="streamingTime">Streaming response...</span><span id="tokenInfo" style="margin-left: 1rem;"></span></div><hr><div id="answerText"><font size="3"></font></div>';
+            submitBtn.disabled = true;
+
+            let currentModel = 'local-model'; // Default model name
+            let inputTokens = 0;
+            let outputTokens = 0;
+
+            try {
+                // Get the current model from LM Studio
+                const modelResponse = await fetch('http://localhost:1234/v1/models');
+                if (modelResponse.ok) {
+                    const modelData = await modelResponse.json();
+                    if (modelData.data && modelData.data.length > 0) {
+                        currentModel = modelData.data[0].id;
+                    }
+                }
+
+                // Fetch token information in parallel (non-streaming request)
+                const tokenPromise = fetch('http://localhost:1234/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: [
+                            { role: "system", content: "You are a helpful assistant." },
+                            { role: "user", content: prompt }
+                        ],
+                        model: "local-model",
+                        temperature: 0.7,
+                        stream: false
+                    })
+                }).then(res => res.json()).catch(() => null);
+
+                // Fetch request to local LM Studio instance with streaming enabled
+                const response = await fetch('http://localhost:1234/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        // This structure is the key to avoiding "Bad Request"
+                        messages: [
+                            { role: "system", content: "You are a helpful assistant." },
+                            { role: "user", content: prompt }
+                        ],
+                        model: "local-model", // LM Studio ignores this and uses what is loaded
+                        temperature: 0.7,
+                        stream: true // Enable streaming
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Server Error: ${response.status} - ${errorText}`);
+                }
+
+                // Read the streaming response
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                const answerDiv = document.getElementById('answerText').querySelector('font');
+                let completeText = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const jsonStr = line.slice(6).trim();
+                            if (jsonStr === '[DONE]') {
+                                continue;
+                            }
+                            try {
+                                const data = JSON.parse(jsonStr);
+                                const content = data.choices[0].delta.content;
+                                if (content) {
+                                    completeText += content;
+                                    answerDiv.textContent = completeText;
+                                }
+                            } catch (e) {
+                                // Ignore JSON parse errors for incomplete lines
+                            }
+                        }
+                    }
+                }
+
+                const laterTime = Date.now();
+                const deltaSeconds = Math.round((laterTime - startTime) / 1000);
+
+                // Update the timing display
+                document.getElementById('streamingTime').textContent = `Time to complete: ${deltaSeconds} seconds`;
+
+                // Get token information from the parallel request
+                const tokenData = await tokenPromise;
+                if (tokenData && tokenData.usage) {
+                    const tokenInfo = document.getElementById('tokenInfo');
+                    inputTokens = tokenData.usage.prompt_tokens;
+                    outputTokens = tokenData.usage.completion_tokens;
+                    tokenInfo.textContent = `  Tokens - Prompt: ${inputTokens}, Completion: ${outputTokens}`;
+                    tokenInfo.style.color = '#666';
+                    tokenInfo.style.fontSize = '0.9em';
+                }
+
+                // Save to database
+                await saveChatToDatabase(prompt, completeText, deltaSeconds, currentModel, inputTokens, outputTokens);
+
+            } catch (error) {
+                console.error(error);
+                let errorMsg = "Error: Could not connect to LM Studio.";
+                
+                if (error.message.includes("Failed to fetch")) {
+                    errorMsg += " Ensure your LM Studio server is running and CORS is enabled.";
+                } else {
+                    errorMsg += error.message;
+                }
+                
+                resultDiv.innerHTML = `<span style="color: red;">${errorMsg}</span>`;
+            } finally {
+                submitBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>

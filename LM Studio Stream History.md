@@ -1,231 +1,249 @@
-# LM Studio Chat Interface with History
-
-A browser-based chat interface for interacting with LM Studio's local language models, featuring real-time streaming responses and persistent chat history storage.
+# LM Studio Stream History Chat Application
 
 ## Overview
 
-This HTML application provides a user-friendly web interface to communicate with LM Studio's local server. It includes streaming response capabilities, automatic chat history persistence, and token usage tracking.
-
-**Version:** 2026.04.07
+A web-based chat interface for LM Studio that provides real-time streaming responses with persistent chat history storage. The application automatically saves all conversations to a SQLite database and provides conversation context from recent chat history.
 
 ## Features
 
-### Core Functionality
-- **Real-time Streaming**: Displays AI responses as they're generated
-- **Local Model Integration**: Connects to LM Studio server running on localhost:1234
-- **Persistent History**: Saves all conversations to a SQLite database
-- **Token Tracking**: Monitors input and output token usage
-- **Response Timing**: Tracks and displays response generation time
+### 🚀 Core Functionality
 
-### Database Features
-- **SQLite Storage**: Uses sql.js for in-browser database management
-- **Auto-save**: Automatically saves conversations to selected folder
-- **File System Access**: Persistent folder access using File System Access API
-- **Dual Storage**: Falls back to localStorage if file access unavailable
-- **Record Tracking**: Displays total conversation count
+- **Real-time Streaming Responses**: Watch AI responses appear word-by-word as they're generated
+- **Persistent Database Storage**: All conversations automatically saved to disk-based SQLite database
+- **Conversation Context**: Automatically includes last 5 conversations as context for continuity
+- **Token Usage Tracking**: Displays prompt and completion token counts for each response
+- **Response Time Monitoring**: Shows time taken to complete each response
+- **Model Information Display**: Shows currently loaded LM Studio model
 
-### User Interface
-- **Clean Design**: Simple, responsive layout
-- **Copy Function**: One-click answer copying to clipboard
-- **Prompt Saving**: Export prompts as versioned text files
-- **Model Display**: Shows currently loaded LM Studio model
-- **Status Indicators**: Visual feedback for database and connection status
+### 💾 Database Features
 
-## Prerequisites
+- **Disk-Only Storage**: No in-memory database - all data persists on disk
+- **Append-Only Operations**: Never erases or replaces existing data
+- **Auto-Save**: Automatically saves after each LM Studio response
+- **Data Preservation**: Maintains all records across app restarts and browser refreshes
+- **Folder Selection**: Choose where to store your chat history database
 
-### Required Software
-1. **LM Studio**: Download from [lmstudio.ai](https://lmstudio.ai)
-2. **Modern Browser**: Chrome or Edge (for File System Access API)
-3. **Local Model**: Any LLM model loaded in LM Studio
+### 📊 Data Stored Per Conversation
 
-### LM Studio Configuration
+Each chat interaction saves:
+- Date (YYYY-MM-DD format)
+- User ID (auto-generated, persistent)
+- Computer OS
+- Model name
+- User input (prompt)
+- AI response
+- Combined history (formatted conversation)
+- Response time (seconds)
+- Input tokens count
+- Output tokens count
+- Timestamp (auto-generated)
 
-#### Method 1: GUI Setup
+## Setup Instructions
+
+### Prerequisites
+
+1. **LM Studio** installed and running
+2. **Modern web browser** (Chrome, Edge, or Firefox with File System Access API support)
+3. **CORS enabled** in LM Studio
+
+### Starting LM Studio Server
+
+#### Option 1: GUI Method
 1. Open LM Studio
 2. Navigate to: **Developer → Local Server**
 3. Click **Server Settings** (middle dropdown)
 4. Enable **"Enable CORS"**
 5. Start server on port **1234**
 
-#### Method 2: CLI Setup
+#### Option 2: CLI Method
 ```bash
 lms server start --cors
-lms load google/gemma4-26b-a4b
+lms load google/gemma4-26b-a4b --context-length 128000
 ```
 
-## Installation
+### First-Time Setup
 
-1. Download `LM Studio Stream History.html`
-2. Open the file in Chrome or Edge browser
-3. No additional installation required
+1. Open `LM Studio Stream History.html` in your web browser
+2. Click the green **"Setup Database Folder"** button
+3. Select a folder where you want to store your chat history
+4. The app will create `lmstudio_chat_history.db` in that folder
+5. Your folder selection is remembered for future sessions
 
 ## Usage
 
-### First Time Setup
+### Basic Chat Flow
 
-1. **Start LM Studio Server**
-   - Ensure CORS is enabled
-   - Verify server is running on port 1234
+1. **Enter your question** in the text area
+2. Click **"Submit"** button
+3. Watch the response stream in real-time
+4. Response is automatically saved to database
+5. Last 5 conversations are loaded as context for next query
 
-2. **Open the HTML File**
-   - Double-click or open in browser
-   - Wait for database initialization
+### Button Functions
 
-3. **Configure Database Storage**
-   - Click **"Setup Database Folder"**
-   - Select a folder for persistent storage
-   - Grant read/write permissions
+- **Submit**: Send your question to LM Studio
+- **Clear**: Clear the input text area
+- **Save Prompt**: Download your prompt as a text file
+- **Copy Answer**: Copy the AI response to clipboard
+- **Setup Database Folder**: Select/change database storage location
 
-### Using the Chat Interface
+### Database Status Indicators
 
-1. **Enter Your Question**
-   - Type your prompt in the textarea
-   - Questions can be multi-line
+The status bar shows:
+- **Warning (Yellow)**: Folder not selected - data won't be saved
+- **Success (Green)**: Connected and auto-saving
+- **Error (Red)**: Database error occurred
 
-2. **Submit Query**
-   - Click **"Submit"** button
-   - Watch response stream in real-time
-
-3. **View Results**
-   - Response appears with streaming effect
-   - Timing and token information displayed
-   - Automatically saved to database
-
-4. **Additional Actions**
-   - **Clear**: Clears the input textarea
-   - **Copy Answer**: Copies response to clipboard
-   - **Save Prompt**: Downloads prompt as versioned text file
+Status displays:
+- Connection status
+- Total record count
+- Auto-save status
 
 ## Database Schema
 
-The application stores conversations in a SQLite database with the following structure:
+### Table: `chat_history`
 
-```sql
-CREATE TABLE chat_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    computer_os TEXT NOT NULL,
-    model TEXT NOT NULL,
-    user_input TEXT NOT NULL,
-    ollama_response TEXT NOT NULL,
-    response_time_seconds INTEGER,
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-```
-
-### Database Files
-- **Primary**: `lmstudio_chat_history.db` (in selected folder)
-- **Backup**: localStorage (browser storage)
-- **Handle Storage**: IndexedDB (for folder permissions)
-
-## File Naming Convention
-
-Saved prompts follow this pattern:
-```
-Prompt LM Studio Chat - YYYY.MM.DD vN.txt
-```
-
-Example: `Prompt LM Studio Chat - 2026.06.05 v0.txt`
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER | Primary key (auto-increment) |
+| date | TEXT | Date of conversation (YYYY-MM-DD) |
+| user_id | TEXT | Unique user identifier |
+| computer_os | TEXT | Operating system |
+| model | TEXT | LM Studio model name |
+| user_input | TEXT | User's prompt/question |
+| ollama_response | TEXT | AI's response |
+| combo_history | TEXT | Formatted conversation |
+| response_time_seconds | INTEGER | Time to complete response |
+| input_tokens | INTEGER | Prompt token count |
+| output_tokens | INTEGER | Completion token count |
+| created_at | DATETIME | Timestamp (auto-generated) |
 
 ## Technical Details
 
+### Database Operations
+
+**Initialization**:
+- Checks if database file exists
+- Only creates new database if file doesn't exist
+- Loads existing database and displays record count
+- Never overwrites existing data on startup
+
+**Saving Records**:
+1. Load existing database from disk
+2. Insert new record (append only)
+3. Write complete database back to disk
+4. Close database connection
+5. Update status with new record count
+
+**Loading Context**:
+- Executes: `SELECT user_input, ollama_response FROM chat_history ORDER BY id DESC LIMIT 5`
+- Reverses results to chronological order
+- Formats as conversation history
+- Includes in system message for AI context
+
 ### API Endpoints Used
-- `GET http://localhost:1234/v1/models` - Retrieves loaded model info
-- `POST http://localhost:1234/v1/chat/completions` - Sends chat requests
 
-### Request Format
-```json
-{
-  "messages": [
-    { "role": "system", "content": "You are a helpful assistant." },
-    { "role": "user", "content": "user prompt here" }
-  ],
-  "model": "local-model",
-  "temperature": 0.7,
-  "stream": true
-}
-```
+- `GET http://localhost:1234/v1/models` - Get current model info
+- `POST http://localhost:1234/v1/chat/completions` - Send chat requests (streaming and non-streaming)
 
-### Dependencies
-- **sql.js**: v1.8.0 (loaded from CDN)
-- **File System Access API**: Browser native
-- **IndexedDB**: Browser native
+### Browser Storage
 
-## Browser Compatibility
+- **IndexedDB**: Stores folder handle for persistent folder access
+- **LocalStorage**: Stores user ID and prompt version tracking
 
-| Feature | Chrome | Edge | Firefox | Safari |
-|---------|--------|------|---------|--------|
-| Core Chat | ✅ | ✅ | ✅ | ✅ |
-| File System Access | ✅ | ✅ | ❌ | ❌ |
-| localStorage Fallback | ✅ | ✅ | ✅ | ✅ |
+## File Management
 
-**Note**: Firefox and Safari users will use localStorage instead of file system storage.
+### Prompt Files
+
+When you click "Save Prompt", the app creates a text file:
+- Format: `Prompt LM Studio Chat - YYYY.MM.DD vN.txt`
+- Auto-increments version number for same-day saves
+- Includes: Title, Model, Date, and Prompt text
+
+### Database File
+
+- Filename: `lmstudio_chat_history.db`
+- Location: User-selected folder
+- Format: SQLite3 database
+- Can be opened with any SQLite browser/tool
 
 ## Troubleshooting
 
 ### "Could not connect to LM Studio"
-- Verify LM Studio server is running
-- Check CORS is enabled
-- Confirm port 1234 is not blocked
-- Ensure a model is loaded
+- Ensure LM Studio server is running on port 1234
+- Verify CORS is enabled in LM Studio settings
+- Check that a model is loaded
 
-### "Database not initialized"
-- Refresh the page
-- Check browser console for errors
-- Clear browser cache if needed
+### "Database not configured"
+- Click "Setup Database Folder" button
+- Select a folder with write permissions
+- Browser will remember your selection
 
-### "Folder access lost"
-- Click "Setup Database Folder" again
-- Re-grant folder permissions
-- Previous data remains in localStorage
+### Data Not Saving
+- Check database status indicator (should be green)
+- Verify folder permissions
+- Try selecting folder again with "Setup Database Folder"
 
-### No Streaming Response
-- Check LM Studio server logs
-- Verify model is properly loaded
-- Try restarting LM Studio server
+### Browser Compatibility
+- Chrome/Edge: Full support
+- Firefox: Limited File System Access API support
+- Safari: Not supported (no File System Access API)
 
-## Data Privacy
+## Privacy & Security
 
-- **All data stays local**: No external servers contacted
-- **User ID**: Generated locally, stored in browser
-- **Database**: Stored in user-selected folder
-- **No telemetry**: No usage tracking or analytics
+- All data stored locally on your computer
+- No cloud services or external connections (except LM Studio)
+- User ID generated locally and stored in browser
+- Database file remains in your selected folder
+- No telemetry or tracking
 
-## Limitations
+## Version Information
 
-- Requires LM Studio running locally
-- File System Access API limited to Chrome/Edge
-- Single conversation thread (no multi-chat support)
-- No conversation editing or deletion UI
+- **Application**: LM Studio Chat v2026.04.07
+- **Database Schema**: v1.0
+- **SQL.js Version**: 1.8.0
 
-## Future Enhancements
+## Advanced Usage
 
-Potential improvements:
-- Multi-conversation management
-- Export/import database functionality
-- Conversation search and filtering
-- Custom system prompts
-- Model parameter controls
-- Dark mode theme
+### Querying the Database
 
-## License
+You can use any SQLite tool to query your chat history:
 
-This is a standalone HTML application. Check LM Studio's license for model usage terms.
+```sql
+-- Get all conversations
+SELECT * FROM chat_history ORDER BY created_at DESC;
+
+-- Get last 10 conversations
+SELECT user_input, ollama_response, response_time_seconds 
+FROM chat_history 
+ORDER BY id DESC 
+LIMIT 10;
+
+-- Get conversations by date
+SELECT * FROM chat_history 
+WHERE date = '2026-06-09';
+
+-- Get average response time
+SELECT AVG(response_time_seconds) as avg_time 
+FROM chat_history;
+
+-- Get token usage statistics
+SELECT 
+    SUM(input_tokens) as total_input,
+    SUM(output_tokens) as total_output,
+    AVG(input_tokens) as avg_input,
+    AVG(output_tokens) as avg_output
+FROM chat_history;
+```
 
 ## Support
 
-For issues related to:
-- **LM Studio**: Visit [lmstudio.ai](https://lmstudio.ai)
-- **This Interface**: Check browser console for error messages
-- **Models**: Refer to specific model documentation
+For issues or questions:
+1. Check LM Studio is running and CORS is enabled
+2. Verify browser compatibility
+3. Check console for error messages (F12 Developer Tools)
+4. Ensure database folder has write permissions
 
-## Version History
+## License
 
-- **v2026.04.07**: Current version with streaming and history features
-
----
-
-**Note**: This application is designed for local use with LM Studio. Ensure your LM Studio server is properly configured before use.
+This application is provided as-is for use with LM Studio.

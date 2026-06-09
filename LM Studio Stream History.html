@@ -689,13 +689,54 @@
                     }
                 }
 
+                // Load last 5 records from database for context
+                let chatHistory = '';
+                if (fileHandle && dbInitialized) {
+                    try {
+                        const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: false });
+                        const file = await fileHandleDb.getFile();
+                        
+                        if (file && file.size > 0) {
+                            const arrayBuffer = await file.arrayBuffer();
+                            const uint8Array = new Uint8Array(arrayBuffer);
+                            const historyDb = new SQL.Database(uint8Array);
+                            
+                            // Get last 5 records ordered by id descending
+                            const results = historyDb.exec(`
+                                SELECT user_input, ollama_response 
+                                FROM chat_history 
+                                ORDER BY id DESC 
+                                LIMIT 5
+                            `);
+                            
+                            if (results.length > 0 && results[0].values.length > 0) {
+                                // Reverse to get chronological order (oldest to newest)
+                                const records = results[0].values.reverse();
+                                chatHistory = '\n\nRecent conversation history:\n';
+                                records.forEach((record, index) => {
+                                    chatHistory += `\nUser: ${record[0]}\nAssistant: ${record[1]}\n`;
+                                });
+                            }
+                            
+                            historyDb.close();
+                            console.log('Loaded last 5 records from database for context');
+                        }
+                    } catch (err) {
+                        console.log('Could not load chat history:', err);
+                    }
+                }
+
+
+                
+
+
                 // Fetch token information in parallel (non-streaming request)
                 const tokenPromise = fetch('http://localhost:1234/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         messages: [
-                            { role: "system", content: `You are an LLM: ${currentModel}`},
+                            { role: "system", content: `You are an LLM.  Filename: ${currentModel}${chatHistory}` },
                             { role: "user", content: prompt }
                         ],
                         model: "local-model",
@@ -710,7 +751,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         messages: [
-                            { role: "system", content: `You are an LLM, your model name is: ${currentModel}` },
+                            { role: "system", content: `You are an LLM, your model name is: ${currentModel}${chatHistory}` },
                             { role: "user", content: prompt }
                         ],
                         model: "local-model", // LM Studio ignores this and uses what is loaded

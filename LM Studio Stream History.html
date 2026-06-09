@@ -7,7 +7,7 @@
     #  ---- or ----
 
     #  cli window
-    lms server start --cors
+    lms server start --cors 
     lms load google/gemma4-26b-a4b --context-length 128000
 
 -->
@@ -160,15 +160,31 @@
     <script>
 
         // Global variables for database
-        let db = null;
         let SQL = null;
         let fileHandle = null;
         let dbInitialized = false;
 
+        // Table schema constant to avoid duplication
+        const TABLE_SCHEMA = `
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                computer_os TEXT NOT NULL,
+                model TEXT NOT NULL,
+                user_input TEXT NOT NULL,
+                ollama_response TEXT NOT NULL,
+                combo_history TEXT NOT NULL,
+                response_time_seconds INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `;
+
         // Initialize sql.js
         async function initDatabase() {
             try {
-                // Wait for sql.js library to be available
                 if (typeof initSqlJs === 'undefined') {
                     throw new Error('sql.js library not loaded from CDN');
                 }
@@ -176,44 +192,28 @@
                 SQL = await initSqlJs({
                     locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}`
                 });
+
+                // Try to load stored directory handle first
+                const storedHandle = await loadDirectoryHandleFromIndexedDB();
                 
-                // Try to load existing database from localStorage
-                const savedDb = localStorage.getItem('lmstudioChatsDb');
-                if (savedDb) {
-                    const uint8Array = new Uint8Array(JSON.parse(savedDb));
-                    db = new SQL.Database(uint8Array);
-                    console.log('Loaded existing database from localStorage');
-                } else {
-                    db = new SQL.Database();
-                    console.log('Created new database');
+                if (storedHandle) {
+                    try {
+                        // Verify the handle is still accessible
+                        const permission = await storedHandle.queryPermission({ mode: 'readwrite' });
+                        if (permission === 'granted') {
+                            fileHandle = storedHandle;
+                            console.log('Auto-loading previously saved folder');
+                            await loadAndInitializeDatabase();
+                            return;
+                        }
+                    } catch (err) {
+                        console.log('Stored handle no longer accessible');
+                    }
                 }
-                
-                // Create table if it doesn't exist
-                db.run(`
-                    CREATE TABLE IF NOT EXISTS chat_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        date TEXT NOT NULL,
-                        user_id TEXT NOT NULL,
-                        computer_os TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        user_input TEXT NOT NULL,
-                        ollama_response TEXT NOT NULL,
-                        response_time_seconds INTEGER,
-                        input_tokens INTEGER,
-                        output_tokens INTEGER,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                `);
-                
-                
-                dbInitialized = true;
-                updateDbStatus('Folder not selected.   Click "Setup Database Folder" to select a folder enable persistent historical auto-save.', 'warning');
-                
-                // Check if we have a saved folder handle
-                const savedHandleId = localStorage.getItem('dbFolderHandleId');
-                if (savedHandleId) {
-                    updateDbStatus('Database ready. Connected to folder with auto-save.', 'success');
-                }
+
+                // No stored handle or not accessible
+                dbInitialized = false;
+                updateDbStatus('Folder not selected. Click "Setup Database Folder" to select a folder enable persistent historical auto-save.', 'warning');
                 
             } catch (error) {
                 console.error('Error initializing sql.js:', error);
@@ -277,50 +277,74 @@
             }
         }
 
-        // Save database to file
-        async function saveDatabaseToFile() {
+        // Append record to disk database file
+        async function appendRecordToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens) {
             if (!fileHandle) {
                 console.log('No folder handle available');
                 return;
             }
             
             try {
-                // Get current data from in-memory database
-                if (!db) {
-                    console.error('Database not initialized');
-                    return;
+                const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+                const userId = getUserId();
+                const computerOs = getComputerOS();
+                const comboHistory = `User: ${userInput}\nAI: ${lmstudioResponse}`;
+                
+                // Always try to load existing database from disk first
+                let db = null;
+                let isNewDatabase = false;
+                
+                try {
+                    const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: false });
+                    const existingFile = await fileHandleDb.getFile();
+                    
+                    if (existingFile && existingFile.size > 0) {
+                        // Load existing database
+                        const arrayBuffer = await existingFile.arrayBuffer();
+                        const uint8Array = new Uint8Array(arrayBuffer);
+                        db = new SQL.Database(uint8Array);
+                        console.log('Loaded existing database from disk');
+                    }
+                } catch (err) {
+                    // File doesn't exist, will create new one
+                    console.log('Database file does not exist, will create new one');
+                    isNewDatabase = true;
                 }
                 
+                // If no existing database, create new one with table schema
+                if (!db) {
+                    db = new SQL.Database();
+                    db.run(TABLE_SCHEMA);
+                    console.log('Created new database with table schema');
+                }
+                
+                // Insert the new record (append only, never replace)
+                db.run(
+                    `INSERT INTO chat_history (date, user_id, computer_os, model, user_input, ollama_response, combo_history, response_time_seconds, input_tokens, output_tokens)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [date, userId, computerOs, model, userInput, lmstudioResponse, comboHistory, responseTime, inputTokens, outputTokens]
+                );
+                
+                // Export and write back to disk
                 const data = db.export();
-                
-                // Get the file handle with create flag
                 const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: true });
-                
-                // Create writable stream - completely rewrite the database file with all data
-                const writer = await fileHandleDb.createWritable({ truncate: true });
-                
-                // Write the entire database (which includes all existing records + new ones)
+                const writer = await fileHandleDb.createWritable();
                 await writer.write(data);
-                
-                // Close the writer - this ensures the file is properly committed to disk
                 await writer.close();
                 
-                // Also save to localStorage as backup
-                localStorage.setItem('lmstudioChatsDb', JSON.stringify(Array.from(data)));
+                // Get record count
+                const result = db.exec('SELECT COUNT(*) as count FROM chat_history');
+                const recordCount = result[0]?.values[0][0] || 0;
                 
-                console.log('Database saved successfully - all records preserved');
+                // Close the database
+                db.close();
+                
+                console.log(`Record appended to database file (${isNewDatabase ? 'new' : 'existing'})`);
+                updateDbStatus(`Auto-saved | Total records: ${recordCount} | Auto-save enabled`, 'success');
+                
             } catch (error) {
-                console.error('Error saving database:', error);
+                console.error('Error appending to database:', error);
                 updateDbStatus('Error auto-saving database: ' + error.message, 'error');
-                
-                // Fall back to localStorage if file save fails
-                try {
-                    const data = db.export();
-                    localStorage.setItem('lmstudioChatsDb', JSON.stringify(Array.from(data)));
-                    console.log('Saved to localStorage as fallback');
-                } catch (fallbackError) {
-                    console.error('Failed to save to localStorage:', fallbackError);
-                }
             }
         }
 
@@ -394,66 +418,64 @@
         // Load and initialize database from the selected folder
         async function loadAndInitializeDatabase() {
             try {
-                // Try to load existing database from the selected folder
-                const file = await fileHandle.getFile('lmstudio_chat_history.db');
-                if (file && file.size > 0) {
-                    // File exists and has data - load it
-                    const arrayBuffer = await file.arrayBuffer();
-                    const uint8Array = new Uint8Array(arrayBuffer);
+                // Try to get existing database file (without creating it)
+                let fileExists = false;
+                let recordCount = 0;
+                
+                try {
+                    const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: false });
+                    const file = await fileHandleDb.getFile();
                     
-                    // Store current in-memory data before loading from file
-                    let currentData = null;
-                    if (db) {
-                        try {
-                            currentData = db.export();
-                        } catch (e) {
-                            console.log('No existing data to preserve');
-                        }
+                    if (file && file.size > 0) {
+                        fileExists = true;
+                        
+                        // Load to verify structure and get record count
+                        const arrayBuffer = await file.arrayBuffer();
+                        const uint8Array = new Uint8Array(arrayBuffer);
+                        const testDb = new SQL.Database(uint8Array);
+                        
+                        // Get record count
+                        const result = testDb.exec('SELECT COUNT(*) as count FROM chat_history');
+                        recordCount = result[0]?.values[0][0] || 0;
+                        testDb.close();
+                        
+                        console.log(`Database file exists with ${recordCount} records - will append new records only`);
+                        updateDbStatus(`Connected to folder | Database exists with ${recordCount} records | Auto-save enabled`, 'success');
                     }
-                    
-                    // Load database from file
-                    db = new SQL.Database(uint8Array);
-                    
-                    // Verify the table exists
-                    const result = db.exec('SELECT name FROM sqlite_master WHERE type="table" AND name="chat_history"');
-                    if (result.length === 0) {
-                        // Table doesn't exist, create it
-                        db.run(`
-                            CREATE TABLE IF NOT EXISTS chat_history (
-                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                date TEXT NOT NULL,
-                                user_id TEXT NOT NULL,
-                                computer_os TEXT NOT NULL,
-                                model TEXT NOT NULL,
-                                user_input TEXT NOT NULL,
-                                ollama_response TEXT NOT NULL,
-                                response_time_seconds INTEGER,
-                                input_tokens INTEGER,
-                                output_tokens INTEGER,
-                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                            )
-                        `);
-                    }
-                    
-                    const recordCount = getRecordCount();
-                    updateDbStatus(`Connected to folder | ${recordCount} records | Auto-save enabled`, 'success');
-                    console.log(`Loaded database from file with ${recordCount} existing records`);
-                } else {
-                    // File is empty or new - save current in-memory database to file
-                    console.log('Database file is empty or new, saving current data');
-                    await saveDatabaseToFile();
-                    const recordCount = getRecordCount();
-                    updateDbStatus(`Database ready | ${recordCount} records | Auto-save enabled`, 'success');
+                } catch (err) {
+                    // File doesn't exist
+                    console.log('Database file does not exist');
                 }
-            } catch (readError) {
-                // File doesn't exist yet - save current in-memory database to create it
-                console.log('Database file does not exist, creating with current data');
-                await saveDatabaseToFile();
-                const recordCount = getRecordCount();
-                updateDbStatus(`Database ready | ${recordCount} records | Auto-save enabled`, 'success');
+                
+                // Only create new database if file doesn't exist
+                if (!fileExists) {
+                    console.log('Creating new database file');
+                    await createNewDatabaseFile();
+                }
+                
+            } catch (error) {
+                console.error('Error loading database:', error);
+                updateDbStatus('Error loading database: ' + error.message, 'error');
             }
             
             dbInitialized = true;
+        }
+
+        // Helper function to create new database file (ONLY called when file doesn't exist)
+        async function createNewDatabaseFile() {
+            const db = new SQL.Database();
+            db.run(TABLE_SCHEMA);
+            
+            const data = db.export();
+            const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: true });
+            const writer = await fileHandleDb.createWritable();
+            await writer.write(data);
+            await writer.close();
+            
+            db.close();
+            
+            console.log('New database file created');
+            updateDbStatus(`Database ready | New database created with 0 records | Auto-save enabled`, 'success');
         }
 
         // Update database status display
@@ -463,48 +485,26 @@
             statusDiv.className = 'db-status ' + type;
         }
 
-        // Save chat to database
+        // Save chat to database - appends to disk file
         async function saveChatToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens) {
-            if (!db || !dbInitialized) {
+            if (!dbInitialized) {
                 console.error('Database not initialized');
                 return;
             }
             
             try {
-                const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-                const userId = getUserId();
-                const computerOs = getComputerOS();
-                
-                db.run(
-                    `INSERT INTO chat_history (date, user_id, computer_os, model, user_input, ollama_response, response_time_seconds, input_tokens, output_tokens)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [date, userId, computerOs, model, userInput, lmstudioResponse, responseTime, inputTokens, outputTokens]
-                );
-                
-                console.log('Chat saved to database');
-                
-                // Auto-save to file if configured
+                // Append to disk database file if configured
                 if (fileHandle) {
-                    await saveDatabaseToFile();
-                    updateDbStatus(`Auto-saved | Total records: ${getRecordCount()} | Auto-save enabled`, 'success');
+                    await appendRecordToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens);
                 } else {
-                    // Save to localStorage as backup
-                    const data = db.export();
-                    localStorage.setItem('lmstudioChatsDb', JSON.stringify(Array.from(data)));
-                    updateDbStatus(`Saved to memory | Total records: ${getRecordCount()} | Restart to select folder for auto-save`, 'warning');
+                    console.log('No folder selected - record not saved');
+                    updateDbStatus('Record not saved | Select folder for auto-save', 'warning');
                 }
                 
             } catch (error) {
                 console.error('Error saving to database:', error);
                 updateDbStatus('Error saving chat: ' + error.message, 'error');
             }
-        }
-
-        // Get record count
-        function getRecordCount() {
-            if (!db) return 0;
-            const result = db.exec('SELECT COUNT(*) as count FROM chat_history');
-            return result[0]?.values[0][0] || 0;
         }
 
         // Get or create user ID
@@ -531,26 +531,8 @@
             return platform || 'Unknown';
         }
 
-        // Optional: Check if user needs to reconnect to database file
-        async function checkDatabaseReconnection() {
-            const hadFolderHandle = localStorage.getItem('dbFolderHandleId');
-            
-            if (hadFolderHandle) {
-                // Try to reconnect to previous folder
-                try {
-                    const permission = await navigator.permissions.query({ name: 'file-system-access' });
-                    if (permission.state !== 'granted') {
-                        updateDbStatus('Previous folder access lost. Click Setup Database Folder to reconnect.', 'warning');
-                    }
-                } catch (err) {
-                    console.log('Permission check not available');
-                }
-            }
-        }
-
         // Initialize database on page load
         window.addEventListener('DOMContentLoaded', async () => {
-            // Give sql.js time to load from CDN before initializing
             await new Promise(resolve => setTimeout(resolve, 500));
             initDatabase();
             checkCurrentModel();
@@ -690,7 +672,7 @@
 
             // UI Updates
             resultDiv.style.display = 'block';
-            resultDiv.innerHTML = '<div class="answer-meta"><span id="streamingTime">Streaming response...</span><span id="tokenInfo" style="margin-left: 1rem;"></span></div><hr><div id="answerText"><font size="3"></font></div>';
+            resultDiv.innerHTML = '<div class="answer-meta"><span id="streamingTime">Thinking & Streaming a response...</span><span id="tokenInfo" style="margin-left: 1rem;"></span></div><hr><div id="answerText"><font size="3"></font></div>';
             submitBtn.disabled = true;
 
             let currentModel = 'local-model'; // Default model name
@@ -713,7 +695,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         messages: [
-                            { role: "system", content: "You are a helpful assistant." },
+                            { role: "system", content: `You are an LLM: ${currentModel}`},
                             { role: "user", content: prompt }
                         ],
                         model: "local-model",
@@ -727,9 +709,8 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        // This structure is the key to avoiding "Bad Request"
                         messages: [
-                            { role: "system", content: "You are a helpful assistant." },
+                            { role: "system", content: `You are an LLM, your model name is: ${currentModel}` },
                             { role: "user", content: prompt }
                         ],
                         model: "local-model", // LM Studio ignores this and uses what is loaded

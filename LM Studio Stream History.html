@@ -175,6 +175,7 @@
                 user_input TEXT NOT NULL,
                 ollama_response TEXT NOT NULL,
                 combo_history TEXT NOT NULL,
+                combo_vector TEXT NOT NULL,
                 response_time_seconds INTEGER,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
@@ -278,7 +279,7 @@
         }
 
         // Append record to disk database file
-        async function appendRecordToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens) {
+        async function appendRecordToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens, comboVector = '') {
             if (!fileHandle) {
                 console.log('No folder handle available');
                 return;
@@ -320,9 +321,9 @@
                 
                 // Insert the new record (append only, never replace)
                 db.run(
-                    `INSERT INTO chat_history (date, user_id, computer_os, model, user_input, ollama_response, combo_history, response_time_seconds, input_tokens, output_tokens)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [date, userId, computerOs, model, userInput, lmstudioResponse, comboHistory, responseTime, inputTokens, outputTokens]
+                    `INSERT INTO chat_history (date, user_id, computer_os, model, user_input, ollama_response, combo_history, combo_vector, response_time_seconds, input_tokens, output_tokens)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [date, userId, computerOs, model, userInput, lmstudioResponse, comboHistory, comboVector, responseTime, inputTokens, outputTokens]
                 );
                 
                 // Export and write back to disk
@@ -486,7 +487,7 @@
         }
 
         // Save chat to database - appends to disk file
-        async function saveChatToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens) {
+        async function saveChatToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens, comboVector = '') {
             if (!dbInitialized) {
                 console.error('Database not initialized');
                 return;
@@ -495,7 +496,7 @@
             try {
                 // Append to disk database file if configured
                 if (fileHandle) {
-                    await appendRecordToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens);
+                    await appendRecordToDatabase(userInput, lmstudioResponse, responseTime, model, inputTokens, outputTokens, comboVector);
                 } else {
                     console.log('No folder selected - record not saved');
                     updateDbStatus('Record not saved | Select folder for auto-save', 'warning');
@@ -529,6 +530,174 @@
             if (userAgent.indexOf('iOS') !== -1 || userAgent.indexOf('iPhone') !== -1) return 'iOS';
             
             return platform || 'Unknown';
+        }
+
+        // Generate embeddings using simple hash-based vectorization
+        // This creates a 384-dimensional vector from the text
+        function generateEmbeddings(text) {
+            try {
+                if (!text || text.trim().length === 0) {
+                    return null;
+                }
+
+                // Normalize text
+                const normalizedText = text.toLowerCase().trim();
+                
+                // Create a simple but effective embedding using character n-grams and word features
+                const vectorSize = 384; // Common embedding size
+                const vector = new Array(vectorSize).fill(0);
+                
+                // Split into words
+                const words = normalizedText.split(/\s+/);
+                
+                // Feature 1: Word-based hashing (first 256 dimensions)
+                words.forEach((word, idx) => {
+                    if (word.length > 0) {
+                        // Hash word to multiple positions
+                        for (let i = 0; i < 3; i++) {
+                            const hash = simpleHash(word + i) % 256;
+                            vector[hash] += 1.0 / Math.sqrt(words.length);
+                        }
+                    }
+                });
+                
+                // Feature 2: Character trigrams (next 128 dimensions)
+                for (let i = 0; i < normalizedText.length - 2; i++) {
+                    const trigram = normalizedText.substring(i, i + 3);
+                    const hash = (simpleHash(trigram) % 128) + 256;
+                    vector[hash] += 0.5 / Math.sqrt(normalizedText.length);
+                }
+                
+                // Normalize the vector (L2 normalization)
+                const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
+                if (magnitude > 0) {
+                    for (let i = 0; i < vectorSize; i++) {
+                        vector[i] = vector[i] / magnitude;
+                    }
+                }
+                
+                // Convert to JSON string for storage
+                return JSON.stringify(vector);
+            } catch (error) {
+                console.error('Error generating embeddings:', error);
+                return null;
+            }
+        }
+
+        // Simple hash function for string to number conversion
+        function simpleHash(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                const char = str.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash; // Convert to 32-bit integer
+            }
+            return Math.abs(hash);
+        }
+
+        // Calculate cosine similarity between two vectors
+        function cosineSimilarity(vec1, vec2) {
+            if (!vec1 || !vec2 || vec1.length !== vec2.length) {
+                return 0;
+            }
+            
+            let dotProduct = 0;
+            let mag1 = 0;
+            let mag2 = 0;
+            
+            for (let i = 0; i < vec1.length; i++) {
+                dotProduct += vec1[i] * vec2[i];
+                mag1 += vec1[i] * vec1[i];
+                mag2 += vec2[i] * vec2[i];
+            }
+            
+            mag1 = Math.sqrt(mag1);
+            mag2 = Math.sqrt(mag2);
+            
+            if (mag1 === 0 || mag2 === 0) {
+                return 0;
+            }
+            
+            return dotProduct / (mag1 * mag2);
+        }
+
+        // Find similar conversations using vector similarity
+        async function findSimilarConversations(queryText, topK = 5, similarityThreshold = 0.3) {
+            if (!fileHandle || !dbInitialized) {
+                return [];
+            }
+            
+            try {
+                // Generate embedding for the query
+                const queryEmbeddingStr = generateEmbeddings(queryText);
+                if (!queryEmbeddingStr) {
+                    console.log('Could not generate query embedding');
+                    return [];
+                }
+                
+                const queryVector = JSON.parse(queryEmbeddingStr);
+                
+                // Load database
+                const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: false });
+                const file = await fileHandleDb.getFile();
+                
+                if (!file || file.size === 0) {
+                    return [];
+                }
+                
+                const arrayBuffer = await file.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+                const historyDb = new SQL.Database(uint8Array);
+                
+                // Get all records with embeddings
+                const results = historyDb.exec(`
+                    SELECT id, combo_history, combo_vector
+                    FROM chat_history
+                    WHERE combo_vector IS NOT NULL AND combo_vector != ''
+                    ORDER BY id DESC
+                `);
+                
+                historyDb.close();
+                
+                if (results.length === 0 || results[0].values.length === 0) {
+                    console.log('No records with embeddings found');
+                    return [];
+                }
+                
+                // Calculate similarity scores
+                const similarities = [];
+                for (const record of results[0].values) {
+                    const [id, comboHistory, comboVectorStr] = record;
+                    
+                    if (!comboVectorStr) continue;
+                    
+                    try {
+                        const recordVector = JSON.parse(comboVectorStr);
+                        const similarity = cosineSimilarity(queryVector, recordVector);
+                        
+                        if (similarity >= similarityThreshold) {
+                            similarities.push({
+                                id,
+                                comboHistory,
+                                similarity
+                            });
+                        }
+                    } catch (err) {
+                        console.log('Error parsing vector for record', id);
+                    }
+                }
+                
+                // Sort by similarity (highest first) and take top K
+                similarities.sort((a, b) => b.similarity - a.similarity);
+                const topResults = similarities.slice(0, topK);
+                
+                console.log(`Found ${topResults.length} similar conversations (threshold: ${similarityThreshold})`);
+                return topResults;
+                
+            } catch (err) {
+                console.log('Error finding similar conversations:', err);
+                return [];
+            }
         }
 
         // Initialize database on page load
@@ -670,6 +839,10 @@
                 return;
             }
 
+            // Remove any previous diagnostic displays
+            const existingDiagnostics = document.querySelectorAll('[data-diagnostic]');
+            existingDiagnostics.forEach(el => el.remove());
+
             // UI Updates
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = '<div class="answer-meta"><span id="streamingTime">Thinking & Streaming a response...</span><span id="tokenInfo" style="margin-left: 1rem;"></span></div><hr><div id="answerText"><font size="3"></font></div>';
@@ -689,45 +862,53 @@
                     }
                 }
 
-                // Load last 5 records from database for context
+                // Find similar conversations using vector similarity
                 let chatHistory = '';
                 if (fileHandle && dbInitialized) {
                     try {
-                        const fileHandleDb = await fileHandle.getFileHandle('lmstudio_chat_history.db', { create: false });
-                        const file = await fileHandleDb.getFile();
+                        const similarConversations = await findSimilarConversations(prompt, 5, 0.3);
                         
-                        if (file && file.size > 0) {
-                            const arrayBuffer = await file.arrayBuffer();
-                            const uint8Array = new Uint8Array(arrayBuffer);
-                            const historyDb = new SQL.Database(uint8Array);
+                        if (similarConversations.length > 0) {
+                            // Display diagnostic information on screen
+                            let diagnosticHtml = '<div data-diagnostic style="background-color: #e8f4f8; border: 2px solid #0066cc; padding: 15px; margin: 10px 0; border-radius: 5px;">';
+                            diagnosticHtml += '<h3 style="margin-top: 0; color: #0066cc;">🔍 Similarity Search Results</h3>';
+                            diagnosticHtml += `<p><strong>Found ${similarConversations.length} relevant conversation(s) for context:</strong></p>`;
                             
-                            // Get last 5 records ordered by id descending
-                            const results = historyDb.exec(`
-                                SELECT user_input, ollama_response 
-                                FROM chat_history 
-                                ORDER BY id DESC 
-                                LIMIT 5
-                            `);
+                            similarConversations.forEach((conv, index) => {
+                                diagnosticHtml += `<div style="background-color: white; padding: 10px; margin: 10px 0; border-left: 4px solid #0066cc;">`;
+                                diagnosticHtml += `<strong>Match ${index + 1} - Similarity: ${(conv.similarity * 100).toFixed(1)}%</strong><br>`;
+                                diagnosticHtml += `<strong>ID:</strong> ${conv.id}<br>`;
+                                diagnosticHtml += `<pre style="white-space: pre-wrap; background-color: #f5f5f5; padding: 10px; margin-top: 5px;">${conv.comboHistory}</pre>`;
+                                diagnosticHtml += `</div>`;
+                            });
                             
-                            if (results.length > 0 && results[0].values.length > 0) {
-                                // Reverse to get chronological order (oldest to newest)
-                                const records = results[0].values.reverse();
-                                chatHistory = '\n\nRecent conversation history:\n';
-                                records.forEach((record, index) => {
-                                    chatHistory += `\nUser: ${record[0]}\nAssistant: ${record[1]}\n`;
-                                });
-                            }
+                            diagnosticHtml += '</div>';
                             
-                            historyDb.close();
-                            console.log('Loaded last 5 records from database for context');
+                            // Insert diagnostic display before the result div
+                            const resultDiv = document.getElementById('result');
+                            resultDiv.insertAdjacentHTML('beforebegin', diagnosticHtml);
+                            
+                            // Build chat history for AI context
+                            chatHistory = '\n\nRelevant conversation history (based on similarity):\n';
+                            similarConversations.forEach((conv, index) => {
+                                chatHistory += `\n[Similarity: ${(conv.similarity * 100).toFixed(1)}%]\n`;
+                                chatHistory += conv.comboHistory + '\n';
+                            });
+                            console.log(`Loaded ${similarConversations.length} similar conversations for context`);
+                        } else {
+                            console.log('No similar conversations found');
+                            // Display message when no matches found
+                            const resultDiv = document.getElementById('result');
+                            resultDiv.insertAdjacentHTML('beforebegin',
+                                '<div data-diagnostic style="background-color: #fff3cd; border: 2px solid #ffc107; padding: 15px; margin: 10px 0; border-radius: 5px;">' +
+                                '<strong>ℹ️ No similar conversations found</strong> (similarity threshold: 30%)' +
+                                '</div>'
+                            );
                         }
                     } catch (err) {
-                        console.log('Could not load chat history:', err);
+                        console.log('Could not load similar conversations:', err);
                     }
                 }
-
-
-                
 
 
                 // Fetch token information in parallel (non-streaming request)
@@ -736,7 +917,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         messages: [
-                            { role: "system", content: `You are an LLM.  Filename: ${currentModel}${chatHistory}` },
+                            { role: "system", content: `You are an LLM.  Filename: ${currentModel}${chatHistory}.  If you cannot find information to answer the question, please reply I don't know.` },
                             { role: "user", content: prompt }
                         ],
                         model: "local-model",
@@ -751,7 +932,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         messages: [
-                            { role: "system", content: `You are an LLM, your model name is: ${currentModel}${chatHistory}` },
+                            { role: "system", content: `You are an LLM, Filename: ${currentModel}${chatHistory}` },
                             { role: "user", content: prompt }
                         ],
                         model: "local-model", // LM Studio ignores this and uses what is loaded
@@ -815,8 +996,18 @@
                     tokenInfo.style.fontSize = '0.9em';
                 }
 
-                // Save to database
-                await saveChatToDatabase(prompt, completeText, deltaSeconds, currentModel, inputTokens, outputTokens);
+                // Generate embeddings for combo_history
+                const comboHistory = `User: ${prompt}\nAI: ${completeText}`;
+                const comboVector = await generateEmbeddings(comboHistory);
+                
+                if (comboVector) {
+                    console.log('Embeddings generated successfully');
+                } else {
+                    console.log('Embeddings generation failed or not available');
+                }
+
+                // Save to database with embeddings
+                await saveChatToDatabase(prompt, completeText, deltaSeconds, currentModel, inputTokens, outputTokens, comboVector || '');
 
             } catch (error) {
                 console.error(error);
